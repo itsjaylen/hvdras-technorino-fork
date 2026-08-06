@@ -1,5 +1,4 @@
 // SPDX-FileCopyrightText: 2018 Contributors to Chatterino <https://chatterino.com>
-//
 // SPDX-License-Identifier: MIT
 
 #include "providers/twitch/IrcMessageHandler.hpp"
@@ -23,6 +22,7 @@
 #include "providers/twitch/TwitchHelpers.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/twitch/UserColor.hpp"
+#include "singletons/Logging.hpp"      // <--- ADD THIS LINE
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
 #include "singletons/WindowManager.hpp"
@@ -519,6 +519,35 @@ void IrcMessageHandler::handleClearChatMessage(Communi::IrcMessage *message)
         return;
     }
 
+    // --- YOUR LOGGING HOOK ---
+        if (clearChat.disableAllMessages)
+        {
+            getApp()->getChatLogger()->logModerationEvent(
+                chanName, "CLEAR: Chat was cleared by a moderator.");
+        }
+        else if (clearChat.username.has_value() && !clearChat.username->isEmpty())
+        {
+            QString username = *clearChat.username;
+
+            bool ok = false;
+            int duration = message->tags().value("ban-duration").toInt(&ok);
+
+            QString logEntry;
+            if (ok && duration > 0)
+            {
+                logEntry = QString("TIMEOUT: User '%1' timed out for %2 seconds.")
+                               .arg(username)
+                               .arg(duration);
+            }
+            else
+            {
+                logEntry = QString("BAN: User '%1' was permanently banned.")
+                               .arg(username);
+            }
+
+            getApp()->getChatLogger()->logModerationEvent(chanName, logEntry);
+        }        // --- YOUR LOGGING HOOK ENDS HERE ---
+
     // get channel
     auto chan = getApp()->getTwitch()->getChannelOrEmpty(chanName);
 
@@ -563,8 +592,6 @@ void IrcMessageHandler::handleClearChatMessage(Communi::IrcMessage *message)
 
     if (getSettings()->hideModerated)
     {
-        // XXX: This is expensive. We could use a layout request if the layout
-        //      would store the previous message flags.
         getApp()->getWindows()->forceLayoutChannelViews();
     }
 }

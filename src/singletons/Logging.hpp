@@ -31,6 +31,10 @@ public:
 
     virtual void closeChannel(const QString &channelName,
                               const QString &platformName) = 0;
+
+    // ADDED TO INTERFACE
+    virtual void logModerationEvent(const QString &channelName,
+                                   const QString &text) = 0;
 };
 
 class Logging : public ILogging
@@ -44,6 +48,10 @@ public:
 
     void closeChannel(const QString &channelName,
                       const QString &platformName) override;
+
+    // ADDED TO CLASS IMPLEMENTATION
+    void logModerationEvent(const QString &channelName,
+                            const QString &text) override;
 
 private:
     using PlatformName = QString;

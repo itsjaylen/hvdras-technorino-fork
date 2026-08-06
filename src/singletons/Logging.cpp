@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: 2018 Contributors to Chatterino <https://chatterino.com>
-//
 // SPDX-License-Identifier: MIT
 
 #include "singletons/Logging.hpp"
 
 #include "messages/Message.hpp"
-#include "singletons/helper/LoggingChannel.hpp"
 #include "singletons/Settings.hpp"
+#include "singletons/helper/LoggingChannel.hpp"
 
+#include <QDateTime>  // Added
 #include <QDir>
+#include <QFile>      // Added
 #include <QStandardPaths>
+#include <QTextStream> // Added
 
 #include <memory>
 #include <utility>
@@ -18,9 +20,6 @@ namespace chatterino {
 
 Logging::Logging(Settings &settings)
 {
-    // We can safely ignore this signal connection since settings are only-ever destroyed
-    // on application exit
-    // NOTE: SETTINGS_LIFETIME
     std::ignore = settings.loggedChannels.delayedItemsChanged.connect(
         [this, &settings]() {
             this->threadGuard.guard();
@@ -83,7 +82,7 @@ void Logging::addMessage(const QString &channelName, MessagePtr message,
 }
 
 void Logging::closeChannel(const QString &channelName,
-                           const QString &platformName)
+                            const QString &platformName)
 {
     if (platformName.isEmpty())
     {
@@ -96,6 +95,28 @@ void Logging::closeChannel(const QString &channelName,
         return;
     }
     platIt->second.erase(channelName);
+}
+
+// Keep inside the chatterino namespace!
+void Logging::logModerationEvent(const QString &channelName, const QString &text)
+{
+    QString base = getSettings()->logPath.getValue();
+    if (base.isEmpty())
+    {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
+
+    QString dirPath = base + "/ModLogs";
+    QDir().mkpath(dirPath);
+
+    QString filePath = dirPath + "/" + channelName + ".log";
+    QFile file(filePath);
+
+    if (file.open(QIODevice::Append | QIODevice::Text)) {
+        QTextStream out(&file);
+        QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
+        out << "[" << timestamp << "] " << text << "\n";
+    }
 }
 
 }  // namespace chatterino
