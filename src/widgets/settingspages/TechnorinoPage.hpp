@@ -11,6 +11,7 @@ namespace chatterino {
 class GeneralPageView;
 class DescriptionLabel;
 struct DropdownArgs;
+class Settings;
 
 class TechnorinoPage : public SettingsPage
 {
@@ -24,6 +25,12 @@ public:
 private:
     void initLayout(GeneralPageView &layout);
     void initExtra();
+
+    // Section helpers
+    void initChatSection(GeneralPageView &layout, Settings &s);
+    void initModerationLoggingSection(GeneralPageView &layout, Settings &s);
+    void initYoutubeSection(GeneralPageView &layout, Settings &s);
+    void initModerationSection(GeneralPageView &layout, Settings &s);
 
     QString getFont(const DropdownArgs &args) const;
 

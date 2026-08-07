@@ -69,6 +69,56 @@ void addKeyboardModifierSetting(GeneralPageView &layout, const QString &title,
         },
         false);
 }
+
+void addBannerScaleDropdown(GeneralPageView &layout, const QString &label,
+                            auto &setting, const QString &tooltip)
+{
+    layout.addDropdown<float>(
+              label,
+              {"0.5x", "0.6x", "0.75x", "0.9x", "Default", "1.1x", "1.25x",
+               "1.4x", "1.5x", "1.75x", "2x"},
+              setting,
+              [](float val) {
+                  if (val == 1.f)
+                  {
+                      return QString("Default");
+                  }
+                  return QString::number(val) + "x";
+              },
+              [](DropdownArgs args) {
+                  return fuzzyToFloat(args.value, 1.f);
+              },
+              false)
+        ->setToolTip(tooltip);
+}
+
+void addNukeRangeDropdown(GeneralPageView &layout, const QString &label,
+                          auto &setting, const QString &tooltip,
+                          const QStringList &options,
+                          const std::vector<int> &values)
+{
+    layout.addDropdown<int>(
+        label, options, setting,
+        [values, options](int val) {
+            for (int i = 0; i < (int)values.size(); ++i)
+            {
+                if (values[i] == val)
+                    return options[i];
+            }
+            return options.last();
+        },
+        [values, options](DropdownArgs args) {
+            for (int i = 0; i < options.size(); ++i)
+            {
+                if (options[i] == args.value)
+                    return values[i];
+            }
+            return values.back();
+        },
+        false)
+        ->setToolTip(tooltip);
+}
+
 }  // namespace
 
 namespace chatterino {
@@ -106,8 +156,22 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
 {
     auto &s = *getSettings();
 
+    // Section entry points
+    this->initChatSection(layout, s);
+    this->initModerationLoggingSection(layout, s);
+    this->initYoutubeSection(layout, s);
+    this->initModerationSection(layout, s);
+
+    layout.addStretch();
+
+    // Invisible element for layout width matching
+    auto *inv = new BaseWidget(this);
+    layout.addWidget(inv);
+}
+
+void TechnorinoPage::initChatSection(GeneralPageView &layout, Settings &s)
+{
     layout.addTitle("Chat");
-    // SettingWidget::checkbox("", s.hideModerated)->setTooltip("")->addTo(layout);
     SettingWidget::checkbox(
         "Show placeholder in text input box (requires restart)",
         s.showTextInputPlaceholder)
@@ -196,28 +260,6 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
                      "This will NOT guarantee exclusion from viewerlists.")
         ->addTo(layout);
 
-    auto addBannerScaleDropdown = [&layout](const QString &label,
-                                            auto &setting,
-                                            const QString &tooltip) {
-        layout.addDropdown<float>(
-                  label,
-                  {"0.5x", "0.6x", "0.75x", "0.9x", "Default", "1.1x",
-                   "1.25x", "1.4x", "1.5x", "1.75x", "2x"},
-                  setting,
-                  [](float val) {
-                      if (val == 1.f)
-                      {
-                          return QString("Default");
-                      }
-                      return QString::number(val) + "x";
-                  },
-                  [](DropdownArgs args) {
-                      return fuzzyToFloat(args.value, 1.f);
-                  },
-                  false)
-            ->setToolTip(tooltip);
-    };
-
     layout.addTitle("Pinned Messages");
     layout.addDescription("Pinned message banner and pin action options.");
     SettingWidget::checkbox("Move Pin actions to Moderate menu",
@@ -244,11 +286,10 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
         },
         false)
         ->setToolTip("When to show the inline Pin button beside messages.");
-    SettingWidget::checkbox("Show pinned messages",
-                            s.enablePinnedMessages)
+    SettingWidget::checkbox("Show pinned messages", s.enablePinnedMessages)
         ->setTooltip("Show the pinned message banner above chat.")
         ->addTo(layout);
-    addBannerScaleDropdown("Pinned message scale", s.pinnedMessageScale,
+    addBannerScaleDropdown(layout, "Pinned message scale", s.pinnedMessageScale,
                            "Make the pinned message banner larger or smaller.");
     SettingWidget::checkbox("Enable /pin <message text>",
                             s.enablePinCommandMessages)
@@ -277,12 +318,10 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
     layout.addDescription(
         "Poll, prediction, and banner behavior options. Only the "
         "broadcaster can create polls and predictions.");
-    SettingWidget::checkbox("Show predictions",
-                            s.enablePredictions)
+    SettingWidget::checkbox("Show predictions", s.enablePredictions)
         ->setTooltip("Show prediction banners above chat.")
         ->addTo(layout);
-    SettingWidget::checkbox("Show polls",
-                            s.enablePolls)
+    SettingWidget::checkbox("Show polls", s.enablePolls)
         ->setTooltip("Show poll banners above chat.")
         ->addTo(layout);
     SettingWidget::checkbox("Show prediction chat messages",
@@ -369,8 +408,7 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
         ->addTo(layout);
 
     layout.addTitle("Nuke");
-    SettingWidget::checkbox("Enable nuke preview",
-                            s.nukePreviewEnabled)
+    SettingWidget::checkbox("Enable nuke preview", s.nukePreviewEnabled)
         ->setTooltip("While typing /nuke, highlight matching messages in chat "
                      "as a preview.")
         ->addTo(layout);
@@ -386,47 +424,21 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
         ->setTooltip("Reason sent with timeout or ban actions from /nuke.")
         ->addTo(layout);
 
-    auto addNukeRangeDropdown =
-        [&layout](const QString &label, auto &setting, const QString &tooltip,
-                  const QStringList &options,
-                  const std::vector<int> &values) {
-            layout.addDropdown<int>(
-                label, options, setting,
-                [values, options](int val) {
-                    for (int i = 0; i < (int)values.size(); ++i)
-                    {
-                        if (values[i] == val)
-                            return options[i];
-                    }
-                    return options.last();
-                },
-                [values, options](DropdownArgs args) {
-                    for (int i = 0; i < options.size(); ++i)
-                    {
-                        if (options[i] == args.value)
-                            return values[i];
-                    }
-                    return values.back();
-                },
-                false)
-                ->setToolTip(tooltip);
-        };
-
     addNukeRangeDropdown(
-        "Delete max range", s.nukeMaxDeleteRangeSeconds,
+        layout, "Delete max range", s.nukeMaxDeleteRangeSeconds,
         "How far back /nuke delete can scan, and how long it watches for new "
         "messages.",
         {"1 min", "2 min", "5 min", "10 min", "30 min", "1 hour"},
         {60, 120, 300, 600, 1800, 3600});
     addNukeRangeDropdown(
-        "Timeout max range", s.nukeMaxTimeoutRangeSeconds,
+        layout, "Timeout max range", s.nukeMaxTimeoutRangeSeconds,
         "How far back /nuke timeout can scan, and how long it watches for new "
         "messages.",
         {"10 min", "30 min", "1 hour", "2 hours", "3 hours", "6 hours",
          "12 hours"},
         {600, 1800, 3600, 7200, 10800, 21600, 43200});
     addNukeRangeDropdown(
-        "Ban max range", s.nukeMaxBanRangeSeconds,
+        layout, "Ban max range", s.nukeMaxBanRangeSeconds,
         "How far back /nuke ban can scan, and how long it watches for new "
         "messages.",
         {"10 min", "30 min", "1 hour", "2 hours", "3 hours", "6 hours",
@@ -440,12 +452,19 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
             "Language code used by /translate. Use /translateto <lang> "
             "<text> to override per message.")
         ->addTo(layout);
+}
 
+void TechnorinoPage::initModerationLoggingSection(GeneralPageView &layout,
+                                                         Settings &s)
+{
     layout.addTitle("Moderation Logging");
     SettingWidget::checkbox("Enable moderation logging (ModLogs)", s.enableModLogs)
         ->setTooltip("Log channel timeout and ban moderation events to the ModLogs folder.")
         ->addTo(layout);
+}
 
+void TechnorinoPage::initYoutubeSection(GeneralPageView &layout, Settings &s)
+{
     layout.addTitle("YouTube");
     layout.addDescription(
         "A single live chat poll can return several seconds' worth of "
@@ -463,7 +482,10 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
         ->setTooltip("Longest delay used between two staggered messages, "
                      "even if they were actually sent far apart in time.")
         ->addTo(layout);
+}
 
+void TechnorinoPage::initModerationSection(GeneralPageView &layout, Settings &s)
+{
     layout.addTitle("Moderation");
     SettingWidget::checkbox("Show repeated-message counters",
                             s.enableRepeatedMessageDetector)
@@ -528,18 +550,10 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
                                s.repeatedMessagesCounterColor)
         ->setTooltip("Text color for the inline repeated-message counter.")
         ->addTo(layout);
-
-    layout.addStretch();
-
-    // invisible element for width
-    auto *inv = new BaseWidget(this);
-    //    inv->setScaleIndependantWidth(600);
-    layout.addWidget(inv);
 }
 
 void TechnorinoPage::initExtra()
 {
-    /// update cache path
     if (this->cachePath_)
     {
         getSettings()->cachePath.connect(

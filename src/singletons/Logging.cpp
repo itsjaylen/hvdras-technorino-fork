@@ -100,6 +100,12 @@ void Logging::closeChannel(const QString &channelName,
 // Keep inside the chatterino namespace!
 void Logging::logModerationEvent(const QString &channelName, const QString &text)
 {
+    // Skip logging if disabled in Technorino settings
+    if (!getSettings()->enableModLogs)
+    {
+        return;
+    }
+
     QString base = getSettings()->logPath.getValue();
     if (base.isEmpty())
     {
@@ -112,7 +118,8 @@ void Logging::logModerationEvent(const QString &channelName, const QString &text
     QString filePath = dirPath + "/" + channelName + ".log";
     QFile file(filePath);
 
-    if (file.open(QIODevice::Append | QIODevice::Text)) {
+    if (file.open(QIODevice::Append | QIODevice::Text))
+    {
         QTextStream out(&file);
         QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
         out << "[" << timestamp << "] " << text << "\n";

@@ -687,6 +687,7 @@ public:
 
     /// Logging
     BoolSetting enableLogging = {"/logging/enabled", false};
+    BoolSetting enableModLogs = {"/logging/enableModLogs", false};
     BoolSetting onlyLogListedChannels = {"/logging/onlyLogListedChannels",
                                          false};
     BoolSetting separatelyStoreStreamLogs = {
