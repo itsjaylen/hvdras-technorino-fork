@@ -441,6 +441,11 @@ void TechnorinoPage::initLayout(GeneralPageView &layout)
             "<text> to override per message.")
         ->addTo(layout);
 
+    layout.addTitle("Moderation Logging");
+    SettingWidget::checkbox("Enable moderation logging (ModLogs)", s.enableModLogs)
+        ->setTooltip("Log channel timeout and ban moderation events to the ModLogs folder.")
+        ->addTo(layout);
+
     layout.addTitle("YouTube");
     layout.addDescription(
         "A single live chat poll can return several seconds' worth of "
@@ -552,4 +557,3 @@ void TechnorinoPage::initExtra()
 }
 
 }  // namespace chatterino
-
