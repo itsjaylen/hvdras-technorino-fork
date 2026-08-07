@@ -25,6 +25,7 @@ std::optional<YouTubeAccountData> YouTubeAccountData::loadRaw(
 {
     auto channelName =
         QStringSetting::get("/youtubeAccounts/" + key + "/channelName");
+    auto handle = QStringSetting::get("/youtubeAccounts/" + key + "/handle");
     auto channelId =
         QStringSetting::get("/youtubeAccounts/" + key + "/channelId");
     auto clientID =
@@ -49,6 +50,7 @@ std::optional<YouTubeAccountData> YouTubeAccountData::loadRaw(
 
     return YouTubeAccountData{
         .channelName = channelName.trimmed(),
+        .handle = handle.trimmed(),
         .channelId = channelId.trimmed(),
         .clientID = clientID.trimmed(),
         .clientSecret = clientSecret.trimmed(),
@@ -62,6 +64,7 @@ void YouTubeAccountData::save() const
 {
     auto basePath = "/youtubeAccounts/uid" + this->channelId.toStdString();
     QStringSetting::set(basePath + "/channelName", this->channelName);
+    QStringSetting::set(basePath + "/handle", this->handle);
     QStringSetting::set(basePath + "/channelId", this->channelId);
     QStringSetting::set(basePath + "/clientID", this->clientID);
     QStringSetting::set(basePath + "/clientSecret", this->clientSecret);
@@ -75,6 +78,7 @@ void YouTubeAccountData::save() const
 YouTubeAccount::YouTubeAccount(const YouTubeAccountData &args)
     : Account(ProviderId::YouTube)
     , channelName_(args.channelName)
+    , handle_(args.handle)
     , channelId_(args.channelId)
     , clientID_(args.clientID)
     , clientSecret_(args.clientSecret)
@@ -90,6 +94,7 @@ void YouTubeAccount::save() const
 {
     YouTubeAccountData{
         .channelName = this->channelName_,
+        .handle = this->handle_,
         .channelId = this->channelId_,
         .clientID = this->clientID_,
         .clientSecret = this->clientSecret_,
@@ -108,6 +113,11 @@ bool YouTubeAccount::update(const YouTubeAccountData &data)
     {
         changed = true;
         this->channelName_ = data.channelName;
+    }
+    if (this->handle_ != data.handle)
+    {
+        changed = true;
+        this->handle_ = data.handle;
     }
     if (this->channelId_ != data.channelId)
     {

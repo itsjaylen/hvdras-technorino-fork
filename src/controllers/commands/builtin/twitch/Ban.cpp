@@ -8,6 +8,7 @@
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/builtin/kick/ModerationActions.hpp"
+#include "controllers/commands/builtin/youtube/ModerationActions.hpp"
 #include "controllers/commands/CommandContext.hpp"
 #include "controllers/commands/common/ChannelAction.hpp"
 #include "providers/twitch/api/Helix.hpp"
@@ -127,6 +128,10 @@ QString sendBan(const CommandContext &ctx)
     if (ctx.kickChannel)
     {
         return doKickBan(ctx);
+    }
+    if (ctx.youtubeChannel)
+    {
+        return doYouTubeBan(ctx);
     }
 
     const auto command = QStringLiteral("/ban");
@@ -283,6 +288,10 @@ QString sendTimeout(const CommandContext &ctx)
     if (ctx.kickChannel)
     {
         return doKickTimeout(ctx);
+    }
+    if (ctx.youtubeChannel)
+    {
+        return doYouTubeTimeout(ctx);
     }
 
     const auto command = QStringLiteral("/timeout");

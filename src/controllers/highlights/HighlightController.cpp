@@ -16,8 +16,11 @@
 #include "providers/colors/ColorProvider.hpp"
 #include "providers/kick/KickAccount.hpp"
 #include "providers/twitch/TwitchAccount.hpp"  // IWYU pragma: keep
+#include "providers/youtube/YouTubeAccount.hpp"
 #include "providers/twitch/TwitchBadge.hpp"
 #include "singletons/Settings.hpp"
+
+#include <QStringList>
 
 namespace {
 
@@ -220,6 +223,36 @@ void rebuildMessageHighlights(Settings &settings,
             ColorProvider::instance().color(ColorType::SelfHighlight));
 
         checks.emplace_back(highlightPhraseCheck(highlight));
+    }
+
+    auto youtubeUser = getApp()->getAccounts()->youtube.current();
+    if (settings.enableSelfHighlight && !youtubeUser->isAnonymous())
+    {
+        // People @-mention the channel's handle (e.g. "hvdras"), not
+        // necessarily its display name (e.g. "Hydra") - those can differ.
+        // Match against both, since either could show up in a message.
+        QStringList selfPhrases;
+        if (!youtubeUser->handle().isEmpty())
+        {
+            selfPhrases << youtubeUser->handle();
+        }
+        if (!youtubeUser->channelName().isEmpty() &&
+            youtubeUser->channelName() != youtubeUser->handle())
+        {
+            selfPhrases << youtubeUser->channelName();
+        }
+
+        for (const auto &phrase : selfPhrases)
+        {
+            HighlightPhrase highlight(
+                phrase, settings.showSelfHighlightInMentions,
+                settings.enableSelfHighlightTaskbar,
+                settings.enableSelfHighlightSound, false, false,
+                settings.selfHighlightSoundUrl.getValue(),
+                ColorProvider::instance().color(ColorType::SelfHighlight));
+
+            checks.emplace_back(highlightPhraseCheck(highlight));
+        }
     }
 
     auto messageHighlights = settings.highlightedMessages.readOnly();
@@ -471,6 +504,13 @@ HighlightController::HighlightController(Settings &settings,
             this->rebuildChecks(settings);
         });
 
+    this->signalHolder_.managedConnect(
+        accounts->youtube.currentUserChanged, [this, &settings] {
+            qCDebug(chatterinoHighlights)
+                << "Rebuild checks because YouTube user changed";
+            this->rebuildChecks(settings);
+        });
+
     this->rebuildChecks(settings);
 }
 
@@ -521,10 +561,15 @@ std::pair<bool, HighlightResult> HighlightController::check(
                 !kickUser->isAnonymous() && senderName == kickUser->username();
         }
         break;
-        case MessagePlatform::YouTube:
-            // YouTube chat is read-only; there's no logged-in account to
-            // compare against.
-            break;
+        case MessagePlatform::YouTube: {
+            auto youtubeUser = getApp()->getAccounts()->youtube.current();
+            self = !youtubeUser->isAnonymous() &&
+                  (senderName.compare(youtubeUser->channelName(),
+                                      Qt::CaseInsensitive) == 0 ||
+                   senderName.compare(youtubeUser->handle(),
+                                      Qt::CaseInsensitive) == 0);
+        }
+        break;
     }
 
     for (const auto &check : *checks)

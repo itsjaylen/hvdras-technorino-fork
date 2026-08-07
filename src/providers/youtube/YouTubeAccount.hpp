@@ -19,6 +19,12 @@ namespace chatterino {
 
 struct YouTubeAccountData {
     QString channelName;
+    // The channel's @handle, without the leading '@' (e.g. "hvdras", not
+    // "@hvdras" or "Hydra") - what people actually type to mention someone
+    // on YouTube, which can differ from the channel's display name. Used
+    // for the self-highlight/ping phrase. May be empty for accounts logged
+    // in before this field existed, or if the channel has no handle set.
+    QString handle;
     QString channelId;
     QString clientID;
     QString clientSecret;
@@ -60,6 +66,10 @@ public:
     {
         return this->channelName_;
     }
+    QString handle() const
+    {
+        return this->handle_;
+    }
     QString channelId() const
     {
         return this->channelId_;
@@ -85,6 +95,7 @@ private:
     void doRefresh();
 
     QString channelName_;
+    QString handle_;
     QString channelId_;
     QString clientID_;
     QString clientSecret_;

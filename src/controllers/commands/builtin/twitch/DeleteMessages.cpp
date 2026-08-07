@@ -8,6 +8,7 @@
 #include "common/Channel.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/builtin/kick/ModerationActions.hpp"
+#include "controllers/commands/builtin/youtube/ModerationActions.hpp"
 #include "controllers/commands/CommandContext.hpp"
 #include "messages/Message.hpp"
 #include "messages/MessageBuilder.hpp"
@@ -71,6 +72,10 @@ QString deleteOneMessage(const CommandContext &ctx)
     if (ctx.kickChannel)
     {
         return doKickDelete(ctx);
+    }
+    if (ctx.youtubeChannel)
+    {
+        return doYouTubeDelete(ctx);
     }
 
     // This is a wrapper over the Helix delete messages endpoint

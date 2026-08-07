@@ -63,6 +63,10 @@ struct Message {
     QString displayName;
     QString localizedName;
     QString userID;
+    // Currently only set for YouTube, whose live chat feed includes an
+    // avatar thumbnail URL per message - other platforms fetch the avatar
+    // separately via their own APIs instead of carrying it on the message.
+    QString authorAvatarUrl;
     QString timeoutUser;
     QString channelName;
     QColor usernameColor;

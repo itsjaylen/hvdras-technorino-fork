@@ -291,11 +291,26 @@ TwitchChannel::StreamStatus toTwitchStreamStatus(
 TwitchChannel::StreamStatus toTwitchStreamStatus(
     const YouTubeChannel &youtubeChannel)
 {
-    // YouTube's unofficial API doesn't give us viewer count/uptime/category
-    // the way Twitch and Kick do, so those are left at their defaults.
+    // YouTube's unofficial API doesn't give us a category the way Twitch
+    // and Kick do, so that's left at its default - but viewer count and
+    // start time are scraped off the watch page.
+    QString uptime;
+    int uptimeSeconds = 0;
+    if (youtubeChannel.streamStartedAt().isValid())
+    {
+        auto diff = youtubeChannel.streamStartedAt().secsTo(
+            QDateTime::currentDateTimeUtc());
+        uptime = QString::number(diff / 3600) + "h " +
+                QString::number(diff % 3600 / 60) + "m";
+        uptimeSeconds = static_cast<int>(diff);
+    }
+
     return {
         .live = youtubeChannel.isLive(),
+        .viewerCount = youtubeChannel.viewerCount(),
         .title = youtubeChannel.title(),
+        .uptime = uptime,
+        .uptimeSeconds = uptimeSeconds,
         .streamType = QStringLiteral("live"),
     };
 }
@@ -1001,6 +1016,32 @@ void SplitHeader::handleChannelChanged()
                                                      this->updateChannelText();
                                                  });
     }
+    else if (auto *youtubeChannel =
+                 dynamic_cast<YouTubeChannel *>(channel.get()))
+    {
+        // Lets the moderation-mode button correct itself once the real
+        // moderator-status check resolves, instead of only updating on the
+        // next unrelated icon refresh.
+        this->channelConnections_.managedConnect(
+            youtubeChannel->modStatusChanged, [this]() {
+                this->updateIcons();
+            });
+        // Without this, the title/thumbnail tooltip is only ever computed
+        // once at connect time (when the chat is still "connecting", not
+        // live yet) and never refreshes afterwards, so it gets stuck
+        // showing "Offline" even once the stream is actually live.
+        this->channelConnections_.managedConnect(
+            youtubeChannel->liveStatusChanged, [this]() {
+                this->updateChannelText();
+            });
+        // Viewer count/uptime are refreshed periodically while live (see
+        // YouTubeChannel::scheduleStatsRefresh) - without this, the
+        // tooltip would stay frozen at whatever those were on connect.
+        this->channelConnections_.managedConnect(
+            youtubeChannel->streamStatusChanged, [this]() {
+                this->updateChannelText();
+            });
+    }
 
     if (auto *twitchChannel = dynamic_cast<TwitchChannel *>(channel.get()))
     {
@@ -1227,7 +1268,7 @@ void SplitHeader::updateIcons()
 {
     auto channel = this->split_->getSelectedChannel();
 
-    if (channel->isTwitchOrKickChannel())
+    if (channel->isTwitchOrKickChannel() || channel->isYouTubeChannel())
     {
         auto moderationMode = this->split_->getModerationMode() &&
                               !getSettings()->moderationActions.empty();
@@ -1247,6 +1288,14 @@ void SplitHeader::updateIcons()
             });
         }
 
+        // Tried gating this on YouTubeChannel::hasConfirmedModRights()
+        // (a real liveChatModerators.list check) instead of the optimistic
+        // hasModRights(), but that check appears to require the
+        // broadcaster's own token - real moderators using their own
+        // account got locked out of moderation mode entirely, which is
+        // worse than occasionally showing it to a non-mod whose actions
+        // would just get rejected by YouTube's API anyway. Back to
+        // optimistic for now.
         if (channel->hasModRights() || moderationMode)
         {
             this->moderationButton_->show();

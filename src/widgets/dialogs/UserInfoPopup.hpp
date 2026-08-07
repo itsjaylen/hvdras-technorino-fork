@@ -61,6 +61,9 @@ private:
 
     void loadAvatar(const QString &userID, const QString &pictureURL,
                     bool isKick);
+    /// Like loadAvatar, but skips the 7TV lookup - YouTube isn't supported
+    /// there, so it would just be a guaranteed-failing request every time.
+    void loadYouTubeAvatar(const QString &pictureURL);
 
     void loadSevenTVAvatar(const QString &userID, bool isKick);
     void setSevenTVAvatar(const QString &filename, const QByteArray &format);

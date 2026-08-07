@@ -141,6 +141,8 @@ set(SOURCE_FILES
         controllers/commands/builtin/twitch/UpdateColor.hpp
         controllers/commands/builtin/twitch/Warn.cpp
         controllers/commands/builtin/twitch/Warn.hpp
+        controllers/commands/builtin/youtube/ModerationActions.cpp
+        controllers/commands/builtin/youtube/ModerationActions.hpp
         controllers/commands/common/ChannelAction.cpp
         controllers/commands/common/ChannelAction.hpp
         controllers/commands/CommandContext.hpp

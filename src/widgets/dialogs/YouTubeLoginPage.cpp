@@ -264,9 +264,15 @@ private:
                     return;
                 }
                 const auto channel = items.at(0).toObject();
+                const auto snippet = channel["snippet"_L1].toObject();
+                auto handle = snippet["customUrl"_L1].toString();
+                if (handle.startsWith(u'@'))
+                {
+                    handle.remove(0, 1);
+                }
                 YouTubeAccountData data{
-                    .channelName =
-                        channel["snippet"_L1].toObject()["title"_L1].toString(),
+                    .channelName = snippet["title"_L1].toString(),
+                    .handle = handle,
                     .channelId = channel["id"_L1].toString(),
                     .clientID = this->clientID,
                     .clientSecret = this->clientSecret,

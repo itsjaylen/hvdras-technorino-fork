@@ -27,6 +27,8 @@
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeAccount.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
 #include "singletons/Resources.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
@@ -672,6 +674,21 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                         this->userName_, Qt::CaseInsensitive) == 0;
                 visible = kickChannel->hasModRights() && !isMyself;
             }
+            else if (auto *youtubeChannel = dynamic_cast<YouTubeChannel *>(
+                         this->underlyingChannel_.get()))
+            {
+                bool isMyself =
+                    !this->youtubeChannelId_.isEmpty() &&
+                    getApp()->getAccounts()->youtube.current()->channelId() ==
+                        this->youtubeChannelId_;
+                // hasConfirmedModRights() would be stricter/more accurate
+                // in theory, but its liveChatModerators.list check appears
+                // to require the broadcaster's own token - real moderators
+                // got locked out of these buttons entirely with it. Back
+                // to optimistic, matching hasModRights() everywhere else.
+                visible = youtubeChannel->hasModRights() && !isMyself &&
+                          !this->youtubeChannelId_.isEmpty();
+            }
             lineMod->setVisible(visible);
             timeout->setVisible(visible);
         });
@@ -683,12 +700,19 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
             int arg;
             std::tie(action, arg) = item;
 
+            // YouTube has no way to resolve a display name back to a
+            // channel ID, so its commands need the ID we already resolved
+            // for this usercard, passed via the "id:" convention.
+            QString target = this->isYouTube_
+                                ? u"id:"_s % this->youtubeChannelId_
+                                : this->userName_;
+
             switch (action)
             {
                 case TimeoutWidget::Ban: {
                     if (this->underlyingChannel_)
                     {
-                        QString value = "/ban " + this->userName_;
+                        QString value = "/ban " + target;
                         value = getApp()->getCommands()->execCommand(
                             value, this->underlyingChannel_, false);
 
@@ -699,7 +723,7 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                 case TimeoutWidget::Unban: {
                     if (this->underlyingChannel_)
                     {
-                        QString value = "/unban " + this->userName_;
+                        QString value = "/unban " + target;
                         value = getApp()->getCommands()->execCommand(
                             value, this->underlyingChannel_, false);
 
@@ -710,7 +734,7 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                 case TimeoutWidget::Timeout: {
                     if (this->underlyingChannel_)
                     {
-                        QString value = "/timeout " + this->userName_ + " " +
+                        QString value = "/timeout " + target + " " +
                                         QString::number(arg) + 's';
 
                         value = getApp()->getCommands()->execCommand(
@@ -1465,6 +1489,60 @@ void UserInfoPopup::loadAvatar(const QString &userID, const QString &pictureURL,
     }
 }
 
+void UserInfoPopup::loadYouTubeAvatar(const QString &pictureURL)
+{
+    if (pictureURL.isEmpty())
+    {
+        // Not streamer mode - getResources().streamerMode is specifically
+        // that placeholder elsewhere in this file. This is just "we don't
+        // have an avatar URL for this user" (e.g. no message from them
+        // carried one), so leave it blank instead.
+        this->ui_.avatarButton->setPixmap(QPixmap());
+        return;
+    }
+
+    auto filename =
+        getApp()->getPaths().cacheDirectory() + "/" + hashUrl(pictureURL);
+    QFile cacheFile(filename);
+    if (cacheFile.exists())
+    {
+        cacheFile.open(QIODevice::ReadOnly);
+        QPixmap avatar{};
+
+        avatar.loadFromData(cacheFile.readAll());
+        this->ui_.avatarButton->setPixmap(avatar);
+        this->avatarPixmap_ = std::move(avatar);
+    }
+    else
+    {
+        QNetworkRequest req(pictureURL);
+        req.setHeader(QNetworkRequest::UserAgentHeader, "Chatterino");
+        static auto *manager = new QNetworkAccessManager();
+        auto *reply = manager->get(req);
+
+        QObject::connect(reply, &QNetworkReply::finished, this,
+                         [this, reply, filename] {
+                             if (reply->error() == QNetworkReply::NoError)
+                             {
+                                 const auto data = reply->readAll();
+
+                                 QPixmap avatar;
+                                 avatar.loadFromData(data);
+                                 this->ui_.avatarButton->setPixmap(avatar);
+                                 this->saveCacheAvatar(data, filename);
+                                 this->avatarPixmap_ = std::move(avatar);
+                             }
+                             else
+                             {
+                                 this->ui_.avatarButton->setPixmap(QPixmap());
+                             }
+                         });
+    }
+
+    this->helixAvatarUrl_ = pictureURL;
+    this->updateAvatarUrl();
+}
+
 void UserInfoPopup::loadSevenTVAvatar(const QString &userID, bool isKick)
 {
     auto fmt = isKick ? SEVENTV_KICK_USER_API : SEVENTV_TWITCH_USER_API;
@@ -1784,6 +1862,7 @@ void UserInfoPopup::updateYouTubeUserData()
     this->ui_.nameLabel->setProperty("copy-text", this->userName_);
 
     this->youtubeChannelId_.clear();
+    QString avatarUrl;
     if (this->underlyingChannel_)
     {
         for (const auto &message :
@@ -1795,6 +1874,7 @@ void UserInfoPopup::updateYouTubeUserData()
                                            Qt::CaseInsensitive) == 0)
             {
                 this->youtubeChannelId_ = message->userID;
+                avatarUrl = message->authorAvatarUrl;
                 break;
             }
         }
@@ -1813,7 +1893,15 @@ void UserInfoPopup::updateYouTubeUserData()
                                            this->youtubeChannelId_);
     }
 
-    this->ui_.avatarButton->setPixmap(getResources().streamerMode);
+    if (getApp()->getStreamerMode()->isEnabled() &&
+        getSettings()->streamerModeHideUsercardAvatars)
+    {
+        this->ui_.avatarButton->setPixmap(getResources().streamerMode);
+    }
+    else
+    {
+        this->loadYouTubeAvatar(avatarUrl);
+    }
     this->ui_.followageLabel->hide();
     this->ui_.subageLabel->hide();
     this->ui_.liveIndicator->hide();

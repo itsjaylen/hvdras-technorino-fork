@@ -10,14 +10,20 @@
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "controllers/highlights/HighlightController.hpp"
+#include "controllers/highlights/HighlightResult.hpp"
 #include "messages/Emote.hpp"
 #include "messages/Image.hpp"
 #include "messages/Message.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "messages/MessageElement.hpp"
+#include "providers/repetitions/RepeatedMessageDetector.hpp"
+#include "providers/twitch/TwitchBadge.hpp"
+#include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/youtube/YouTubeAccount.hpp"
 #include "providers/youtube/YouTubeApi.hpp"
 #include "singletons/Settings.hpp"
+#include "util/FormatTime.hpp"
 
 #include <QColor>
 #include <QDateTime>
@@ -48,6 +54,8 @@ constexpr int REDISCOVERY_RETRY_MS = 60000;
 
 constexpr int PAGE_FETCH_TIMEOUT_MS = 15000;
 constexpr int LIVE_CHAT_TIMEOUT_MS = 20000;
+// How often to refresh the tab tooltip's viewer count/uptime while live.
+constexpr int STATS_REFRESH_MS = 60000;
 
 // Innertube client context sent with every request.
 // clientVersion follows YouTube's YYYY-MMDD.HH.MM format.
@@ -224,39 +232,102 @@ QString extractMetaContent(const QByteArray &body, const QByteArray &property)
     return value;
 }
 
-/// Parse ytInitialData JSON from page HTML.
-/// Returns the JSON document, or null if not found / parse failed.
-QJsonDocument extractYtInitialData(const QByteArray &body)
+/// Finds the end (exclusive) of a JSON value starting at `start` (which
+/// must point at its opening '{' or '['), by tracking brace/bracket depth
+/// and skipping over string literals (respecting escaped quotes). A naive
+/// "find the next `;`" search isn't reliable here: some of these <script>
+/// tags (ytInitialPlayerResponse in particular) contain more JS statements
+/// after the JSON assignment, each ending in their own `;`, before the
+/// tag actually closes - confirmed by that specific case's -1-scoped
+/// semicolon search grabbing an unrelated later statement instead of the
+/// JSON's real end.
+qsizetype findJsonValueEnd(const QByteArray &body, qsizetype start)
 {
-    static const QByteArray MARKER1 = "var ytInitialData = ";
-    static const QByteArray MARKER2 = "ytInitialData = ";
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (qsizetype i = start; i < body.size(); ++i)
+    {
+        char c = body.at(i);
+        if (inString)
+        {
+            if (escaped)
+            {
+                escaped = false;
+            }
+            else if (c == '\\')
+            {
+                escaped = true;
+            }
+            else if (c == '"')
+            {
+                inString = false;
+            }
+            continue;
+        }
 
-    int idx = body.indexOf(MARKER1);
+        if (c == '"')
+        {
+            inString = true;
+        }
+        else if (c == '{' || c == '[')
+        {
+            depth++;
+        }
+        else if (c == '}' || c == ']')
+        {
+            depth--;
+            if (depth == 0)
+            {
+                return i + 1;
+            }
+        }
+    }
+    return -1;
+}
+
+/// Parse a `var <varName> = {...};` inline JSON blob from page HTML.
+/// Returns the JSON document, or null if not found / parse failed.
+QJsonDocument extractInlineJson(const QByteArray &body,
+                                const QByteArray &varName)
+{
+    const QByteArray marker1 = "var " + varName + " = ";
+    const QByteArray marker2 = varName + " = ";
+
+    int idx = body.indexOf(marker1);
     if (idx != -1)
     {
-        idx += static_cast<int>(MARKER1.size());
+        idx += static_cast<int>(marker1.size());
     }
     else
     {
-        idx = body.indexOf(MARKER2);
+        idx = body.indexOf(marker2);
         if (idx == -1)
         {
             return {};
         }
-        idx += static_cast<int>(MARKER2.size());
+        idx += static_cast<int>(marker2.size());
     }
 
-    auto endIdx = body.indexOf(";</script>", idx);
-    if (endIdx == -1)
-    {
-        endIdx = body.indexOf(';', idx);
-    }
+    auto endIdx = findJsonValueEnd(body, idx);
     if (endIdx == -1)
     {
         return {};
     }
 
     return QJsonDocument::fromJson(body.mid(idx, endIdx - idx));
+}
+
+QJsonDocument extractYtInitialData(const QByteArray &body)
+{
+    return extractInlineJson(body, "ytInitialData");
+}
+
+/// ytInitialPlayerResponse carries stream metadata ytInitialData doesn't,
+/// like the broadcast's actual start time.
+QJsonDocument extractYtInitialPlayerResponse(const QByteArray &body)
+{
+    return extractInlineJson(body, "ytInitialPlayerResponse");
 }
 
 /// Extract text from a YouTube "runs" array (list of text/emoji run objects).
@@ -347,10 +418,31 @@ void appendMessageRuns(MessageBuilder &builder, const QJsonArray &runs)
         auto run = runVal.toObject();
         if (run.contains("text"_L1))
         {
-            builder.emplace<TextElement>(
-                run["text"].toString(),
-                MessageElementFlags{MessageElementFlag::Text},
-                MessageColor::Text);
+            auto text = run["text"].toString();
+            if (text.contains(u'@'))
+            {
+                // Route word-by-word through the same @mention detection
+                // Twitch messages use, so a mention becomes clickable (and
+                // opens that user's usercard) if they're still in the
+                // local message history - same lookup UserInfoPopup
+                // already does for YouTube usernames. Only done for runs
+                // that could plausibly contain one, to leave every other
+                // message's rendering untouched.
+                for (const auto &word : text.split(u' '))
+                {
+                    if (word.isEmpty())
+                    {
+                        continue;
+                    }
+                    builder.addWordFromUserMessage(word);
+                }
+            }
+            else
+            {
+                builder.emplace<TextElement>(
+                    text, MessageElementFlags{MessageElementFlag::Text},
+                    MessageColor::Text);
+            }
             continue;
         }
 
@@ -537,11 +629,146 @@ MessagePtr makeYouTubeDeletionMessage(const MessagePtr &original)
     return builder.release();
 }
 
-/// Handle a `removeChatItemAction`: a single message was removed by a
-/// moderator (or by the author themselves).
-void handleMessageDeleted(Channel &channel, const QJsonObject &action)
+/// Runs a built message through the shared highlight-checking pipeline
+/// (self-mention, user-defined phrases, badge/user highlights, etc.) that
+/// Twitch/Kick messages already go through - mirrors
+/// KickMessageBuilder.cpp's processHighlights. Sets the Highlighted/
+/// ShowInMentions flags and highlight color directly on the message; the
+/// returned alert still needs to reach MessageBuilder::triggerHighlights to
+/// actually play a sound or flash the taskbar.
+HighlightAlert processYouTubeHighlights(MessageBuilder &builder)
 {
-    const auto targetItemId = action["targetItemId"].toString();
+    if (getSettings()->isBlacklistedUser(builder->loginName))
+    {
+        return {};
+    }
+
+    MessageParseArgs args;
+    auto [highlighted, highlightResult] = getApp()->getHighlights()->check(
+        args, {}, builder->loginName, builder->messageText, builder->flags,
+        builder->platform);
+
+    if (!highlighted)
+    {
+        return {};
+    }
+
+    builder->flags.set(MessageFlag::Highlighted);
+    builder->highlightColor = highlightResult.color;
+
+    if (highlightResult.showInMentions)
+    {
+        builder->flags.set(MessageFlag::ShowInMentions);
+    }
+
+    return {
+        .customSound = highlightResult.customSoundUrl.value_or(QUrl{}),
+        .playSound = highlightResult.playSound,
+        .windowAlert = highlightResult.alert,
+    };
+}
+
+/// Whether the author's badges include a specific icon type ("MODERATOR",
+/// "OWNER") - used by the repeated-message counter below, which needs a
+/// plain bool rather than the badge emote parseAuthorBadges builds.
+bool authorHasBadgeIconType(const QJsonObject &renderer, QStringView iconType)
+{
+    const auto authorBadges = renderer["authorBadges"].toArray();
+    for (const auto &badgeVal : authorBadges)
+    {
+        auto badgeRenderer =
+            badgeVal.toObject()["liveChatAuthorBadgeRenderer"].toObject();
+        if (badgeRenderer["icon"].toObject()["iconType"].toString() ==
+            iconType)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Adds the "xN" repeated-message counter Twitch chat already has - mirrors
+/// appendRepeatedMessageCounter in MessageBuilder.cpp, adapted since
+/// YouTube has no IRC tags to read this from. `broadcasterChannelId` is
+/// passed in rather than read off the channel directly since this is a free
+/// function, not a YouTubeChannel member, and that field is private.
+void appendYouTubeRepeatedMessageCounter(MessageBuilder &builder,
+                                         YouTubeChannel &channel,
+                                         const QString &broadcasterChannelId,
+                                         const QJsonObject &renderer,
+                                         bool historical)
+{
+    auto *detector = getApp()->getRepeatedMessageDetector();
+    if (detector == nullptr)
+    {
+        return;
+    }
+
+    bool senderIsBroadcaster = authorHasBadgeIconType(renderer, u"OWNER") ||
+                               (!broadcasterChannelId.isEmpty() &&
+                                builder->userID == broadcasterChannelId);
+
+    const RepeatedMessageCheck check{
+        .channelID = builder->channelName,
+        .userID = builder->userID,
+        .messageID = builder->id,
+        .message = builder->messageText,
+        .historical = historical,
+        .channelCanModerate = channel.hasModRights(),
+        .senderIsModerator = authorHasBadgeIconType(renderer, u"MODERATOR"),
+        .senderIsBroadcaster = senderIsBroadcaster,
+        .senderIsVip = false,
+    };
+
+    auto count = detector->check(check);
+    if (!count)
+    {
+        return;
+    }
+
+    builder.message().flags.set(MessageFlag::RepeatedMessage);
+
+    QColor color(getSettings()->repeatedMessagesCounterColor.getValue());
+    if (!color.isValid())
+    {
+        color = QColor("#ff3b3b");
+    }
+
+    builder
+        .emplace<TextElement>(QStringLiteral("x%1").arg(*count),
+                              MessageElementFlag::RepeatedMessageCounter,
+                              MessageColor(color), FontStyle::ChatMedium)
+        ->setTrailingSpace(false);
+}
+
+struct PendingYouTubeMessage {
+    qint64 timestampUsec;
+    MessagePtr message;
+    HighlightAlert alert;
+};
+
+/// Plays/flashes a message's highlight alert (skipped entirely for catch-up
+/// history - see the call sites) and adds it to the global Mentions channel
+/// if it qualifies, same as Twitch/Kick do for their own highlighted
+/// messages.
+void deliverYouTubeHighlight(YouTubeChannel &channel,
+                             const PendingYouTubeMessage &pending)
+{
+    MessageBuilder::triggerHighlights(&channel, pending.alert);
+    if (pending.message->flags.has(MessageFlag::Highlighted) &&
+        pending.message->flags.has(MessageFlag::ShowInMentions))
+    {
+        getApp()->getTwitch()->getMentionsChannel()->addMessage(
+            pending.message, MessageContext::Original);
+    }
+}
+
+/// Hides a message and (optionally) posts the "was deleted" system message.
+/// Used both when we see YouTube's own `removeChatItemAction` on a live chat
+/// poll, and optimistically right after our own delete call succeeds -
+/// idempotent so whichever of the two happens second is a no-op.
+void handleMessageDeleted(Channel &channel, const QString &targetItemId)
+{
     if (targetItemId.isEmpty())
     {
         return;
@@ -553,6 +780,11 @@ void handleMessageDeleted(Channel &channel, const QJsonObject &action)
         qCWarning(chatterinoYoutube)
             << "removeChatItemAction targeted unknown message id"
             << targetItemId;
+        return;
+    }
+
+    if (msg->flags.has(MessageFlag::Disabled))
+    {
         return;
     }
 
@@ -568,7 +800,8 @@ void handleMessageDeleted(Channel &channel, const QJsonObject &action)
 
 /// Handle a `removeChatItemByAuthorAction`: all of a user's messages were
 /// removed, e.g. as part of a ban/timeout.
-void handleAuthorMessagesDeleted(Channel &channel, const QJsonObject &action)
+void handleAuthorMessagesDeleted(YouTubeChannel &channel,
+                                 const QJsonObject &action)
 {
     const auto externalChannelId = action["externalChannelId"].toString();
     if (externalChannelId.isEmpty())
@@ -602,12 +835,31 @@ void handleAuthorMessagesDeleted(Channel &channel, const QJsonObject &action)
         return;
     }
 
-    if (!getSettings()->hideDeletionActions)
+    if (getSettings()->hideDeletionActions)
     {
-        channel.addSystemMessage(
-            u"YouTube: %1's messages were removed by a moderator."_s.arg(
-                authorName));
+        return;
     }
+
+    // Only known for bans/timeouts issued from this session - YouTube's
+    // live chat feed doesn't say which kind a removal was.
+    if (auto recorded = channel.peekBanDuration(externalChannelId))
+    {
+        if (*recorded)
+        {
+            channel.addSystemMessage(u"YouTube: %1 was timed out for %2."_s.arg(
+                authorName, formatTime(**recorded)));
+        }
+        else
+        {
+            channel.addSystemMessage(
+                u"YouTube: %1 was banned."_s.arg(authorName));
+        }
+        return;
+    }
+
+    channel.addSystemMessage(
+        u"YouTube: %1's messages were removed by a moderator."_s.arg(
+            authorName));
 }
 
 }  // namespace
@@ -663,6 +915,16 @@ void YouTubeChannel::initialize()
 
 YouTubeChannel::~YouTubeChannel() = default;
 
+std::shared_ptr<YouTubeChannel> YouTubeChannel::sharedFromThis()
+{
+    return std::static_pointer_cast<YouTubeChannel>(this->shared_from_this());
+}
+
+std::weak_ptr<YouTubeChannel> YouTubeChannel::weakFromThis()
+{
+    return this->sharedFromThis();
+}
+
 const QString &YouTubeChannel::videoId() const
 {
     return this->videoId_;
@@ -676,6 +938,16 @@ const QString &YouTubeChannel::title() const
 const QString &YouTubeChannel::thumbnailUrl() const
 {
     return this->thumbnailUrl_;
+}
+
+unsigned YouTubeChannel::viewerCount() const
+{
+    return this->viewerCount_;
+}
+
+const QDateTime &YouTubeChannel::streamStartedAt() const
+{
+    return this->streamStartedAt_;
 }
 
 bool YouTubeChannel::canSendMessage() const
@@ -711,15 +983,101 @@ void YouTubeChannel::reconnect()
 
 bool YouTubeChannel::hasModRights() const
 {
-    // We have no cheap way to know whether the logged-in account is
-    // specifically a moderator/owner of *this* chat without an extra
-    // quota-costing API call, so any non-anonymous YouTube login is treated
-    // as having rights here. If it isn't actually one for this channel, the
-    // API call itself will fail with a permission error.
+    // Only ever trust a *positive* confirmation here (reliable either way:
+    // an exact broadcaster-channel-ID match, or a moderator-list hit). A
+    // negative result isn't trusted for hiding tools - checkIsModerator's
+    // liveChatModerators.list call appears to require the broadcaster's
+    // own token, so a real moderator's own account can get a "confirmed
+    // false" that's actually just YouTube rejecting the check itself, not
+    // a genuine answer. See hasConfirmedModRights for the strict version.
+    if (this->confirmedModRights_ && *this->confirmedModRights_)
+    {
+        return true;
+    }
+
+    // const_cast: hasModRights() is called from const contexts (e.g.
+    // context menu construction), but kicking off the real check is a
+    // cache-filling side effect - confirmedModRights_/checkingModRights_
+    // are the only things it touches, and both are mutable.
+    const_cast<YouTubeChannel *>(this)->refreshModStatus();
+
+    // Fall back to the old optimistic heuristic while the real check is
+    // still in flight (or couldn't be started, e.g. nobody logged in).
     return !getApp()->getAccounts()->youtube.current()->isAnonymous();
 }
 
-void YouTubeChannel::deleteMessage(const QString &authorChannelId,
+bool YouTubeChannel::hasConfirmedModRights() const
+{
+    if (!this->confirmedModRights_)
+    {
+        const_cast<YouTubeChannel *>(this)->refreshModStatus();
+    }
+    return this->confirmedModRights_.value_or(false);
+}
+
+void YouTubeChannel::refreshModStatus()
+{
+    if (this->checkingModRights_ || this->confirmedModRights_ ||
+        this->attemptedModStatusCheck_)
+    {
+        return;
+    }
+
+    auto account = getApp()->getAccounts()->youtube.current();
+    if (account->isAnonymous())
+    {
+        return;
+    }
+
+    this->attemptedModStatusCheck_ = true;
+    this->checkingModRights_ = true;
+    auto myChannelId = account->channelId();
+    auto weak = this->weakFromThis();
+
+    this->resolveLiveChatInfo(
+        [weak, myChannelId](const ExpectedStr<YouTubeLiveChatInfo> &res) {
+            auto self = weak.lock();
+            if (!self)
+            {
+                return;
+            }
+            if (!res)
+            {
+                // Inconclusive - leave confirmedModRights_ unset so
+                // hasModRights() keeps using the optimistic fallback.
+                self->checkingModRights_ = false;
+                return;
+            }
+            if (res->broadcasterChannelId == myChannelId)
+            {
+                self->confirmedModRights_ = true;
+                self->checkingModRights_ = false;
+                self->modStatusChanged.invoke();
+                return;
+            }
+
+            getYouTubeApi()->checkIsModerator(
+                res->liveChatId, myChannelId,
+                [weak](const ExpectedStr<bool> &modRes) {
+                    auto self = weak.lock();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    self->checkingModRights_ = false;
+                    if (modRes)
+                    {
+                        self->confirmedModRights_ = *modRes;
+                        self->modStatusChanged.invoke();
+                    }
+                    // else inconclusive (e.g. YouTube restricting this
+                    // endpoint for non-owner accounts) - leave unset.
+                });
+        });
+}
+
+void YouTubeChannel::deleteMessage(const QString &messageId,
+                                   const QString &authorChannelId,
                                    const QDateTime &timestamp,
                                    const QString &messageText)
 {
@@ -733,11 +1091,22 @@ void YouTubeChannel::deleteMessage(const QString &authorChannelId,
         self->addSystemMessage(u"Failed to delete message: " % error);
     };
 
-    auto findAndDelete = [weak, authorChannelId, timestamp, messageText,
-                          reportError](const QString &liveChatId) {
+    this->resolveLiveChatInfo(
+        [weak, messageId, authorChannelId, timestamp, messageText,
+         reportError](const ExpectedStr<YouTubeLiveChatInfo> &idRes) {
+        if (!weak.lock())
+        {
+            return;
+        }
+        if (!idRes)
+        {
+            reportError(idRes.error());
+            return;
+        }
+
         getYouTubeApi()->findMessageId(
-            liveChatId, authorChannelId, timestamp, messageText,
-            [weak, reportError](const ExpectedStr<QString> &res) {
+            idRes->liveChatId, authorChannelId, timestamp, messageText,
+            [weak, messageId, reportError](const ExpectedStr<QString> &res) {
                 if (!weak.lock())
                 {
                     return;
@@ -748,37 +1117,84 @@ void YouTubeChannel::deleteMessage(const QString &authorChannelId,
                     return;
                 }
                 getYouTubeApi()->deleteMessageById(
-                    *res, [reportError](const ExpectedStr<void> &delRes) {
+                    *res, [weak, messageId,
+                           reportError](const ExpectedStr<void> &delRes) {
                         if (!delRes)
                         {
                             reportError(delRes.error());
+                            return;
                         }
+                        auto self = std::static_pointer_cast<YouTubeChannel>(
+                            weak.lock());
+                        if (!self)
+                        {
+                            return;
+                        }
+                        // Hide it immediately instead of waiting for the
+                        // next live chat poll to notice YouTube's own
+                        // removeChatItemAction for it.
+                        handleMessageDeleted(*self, messageId);
                     });
             });
-    };
+    });
+}
 
+void YouTubeChannel::resolveLiveChatInfo(
+    std::function<void(ExpectedStr<YouTubeLiveChatInfo>)> cb)
+{
     if (!this->liveChatId_.isEmpty())
     {
-        findAndDelete(this->liveChatId_);
+        cb(YouTubeLiveChatInfo{this->liveChatId_, this->broadcasterChannelId_});
         return;
     }
 
-    getYouTubeApi()->getLiveChatId(
+    auto weak = this->weak_from_this();
+    getYouTubeApi()->getLiveChatInfo(
         this->videoId_,
-        [weak, findAndDelete, reportError](const ExpectedStr<QString> &res) {
+        [weak, cb = std::move(cb)](const ExpectedStr<YouTubeLiveChatInfo> &res) {
             auto self = std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
             {
                 return;
             }
-            if (!res)
+            if (res)
             {
-                reportError(res.error());
-                return;
+                self->liveChatId_ = res->liveChatId;
+                self->broadcasterChannelId_ = res->broadcasterChannelId;
             }
-            self->liveChatId_ = *res;
-            findAndDelete(*res);
+            cb(res);
         });
+}
+
+void YouTubeChannel::recordBan(const QString &targetChannelId,
+                               const QString &banId,
+                               std::optional<std::chrono::seconds> duration)
+{
+    this->bansByChannelId_[targetChannelId] = RecordedBan{banId, duration};
+}
+
+std::optional<QString> YouTubeChannel::takeBanId(
+    const QString &targetChannelId)
+{
+    auto it = this->bansByChannelId_.find(targetChannelId);
+    if (it == this->bansByChannelId_.end())
+    {
+        return std::nullopt;
+    }
+    auto banId = it.value().banId;
+    this->bansByChannelId_.erase(it);
+    return banId;
+}
+
+std::optional<std::optional<std::chrono::seconds>>
+    YouTubeChannel::peekBanDuration(const QString &targetChannelId) const
+{
+    auto it = this->bansByChannelId_.find(targetChannelId);
+    if (it == this->bansByChannelId_.end())
+    {
+        return std::nullopt;
+    }
+    return it.value().duration;
 }
 
 void YouTubeChannel::setLive(bool live)
@@ -789,6 +1205,68 @@ void YouTubeChannel::setLive(bool live)
     }
     this->live_ = live;
     this->liveStatusChanged.invoke();
+    if (live)
+    {
+        this->scheduleStatsRefresh();
+    }
+}
+
+void YouTubeChannel::scheduleStatsRefresh()
+{
+    auto weak = this->weak_from_this();
+    QTimer::singleShot(STATS_REFRESH_MS, [weak] {
+        auto self = std::static_pointer_cast<YouTubeChannel>(weak.lock());
+        if (!self || !self->live_)
+        {
+            // Stream ended (or channel closed) - stop rescheduling.
+            return;
+        }
+        self->refreshStreamStats();
+        self->scheduleStatsRefresh();
+    });
+}
+
+void YouTubeChannel::refreshStreamStats()
+{
+    if (this->videoId_.isEmpty())
+    {
+        return;
+    }
+
+    auto weak = this->weak_from_this();
+    NetworkRequest(u"https://www.youtube.com/watch?v=%1"_s.arg(this->videoId_))
+        .header("User-Agent", USER_AGENT)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .followRedirects(true)
+        .timeout(PAGE_FETCH_TIMEOUT_MS)
+        .onSuccess([weak](const NetworkResult &result) {
+            auto self = std::static_pointer_cast<YouTubeChannel>(weak.lock());
+            if (!self)
+            {
+                return;
+            }
+
+            const auto &body = result.getData();
+            auto doc = extractYtInitialData(body);
+            if (!doc.isNull())
+            {
+                self->viewerCount_ =
+                    findKey(doc.object(), u"originalViewCount"_s).toUInt();
+            }
+            if (!self->streamStartedAt_.isValid())
+            {
+                self->streamStartedAt_ = QDateTime::fromString(
+                    findKey(extractYtInitialPlayerResponse(body).object(),
+                           u"startTimestamp"_s),
+                    Qt::ISODate);
+            }
+            self->streamStatusChanged.invoke();
+        })
+        .onError([](const NetworkResult & /*result*/) {
+            // Silent - this is a periodic cosmetic refresh, not worth a
+            // system message every time it has a hiccup.
+        })
+        .execute();
 }
 
 void YouTubeChannel::scheduleRediscovery()
@@ -866,9 +1344,21 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
                 return;
             }
 
+            self->viewerCount_ =
+                findKey(doc.object(), u"originalViewCount"_s).toUInt();
+            self->streamStartedAt_ = QDateTime::fromString(
+                findKey(extractYtInitialPlayerResponse(body).object(),
+                       u"startTimestamp"_s),
+                Qt::ISODate);
+
             self->setLive(true);
             self->receivedFirstBatch_ = false;
             self->liveChatId_.clear();
+            self->broadcasterChannelId_.clear();
+            self->confirmedModRights_.reset();
+            self->checkingModRights_ = false;
+            self->attemptedModStatusCheck_ = false;
+            self->bansByChannelId_.clear();
             self->addSystemMessage(
                 u"YouTube: Live chat found for %1, connecting..."_s.arg(
                     self->videoId_));
@@ -949,9 +1439,21 @@ void YouTubeChannel::fetchWatchPage()
                 return;
             }
 
+            self->viewerCount_ =
+                findKey(doc.object(), u"originalViewCount"_s).toUInt();
+            self->streamStartedAt_ = QDateTime::fromString(
+                findKey(extractYtInitialPlayerResponse(body).object(),
+                       u"startTimestamp"_s),
+                Qt::ISODate);
+
             self->setLive(true);
             self->receivedFirstBatch_ = false;
             self->liveChatId_.clear();
+            self->broadcasterChannelId_.clear();
+            self->confirmedModRights_.reset();
+            self->checkingModRights_ = false;
+            self->attemptedModStatusCheck_ = false;
+            self->bansByChannelId_.clear();
             self->addSystemMessage(u"YouTube: Live chat found, connecting..."_s);
             self->fetchLiveChat(continuation);
         })
@@ -1090,7 +1592,7 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
             }
 
             // Parse chat messages
-            std::vector<std::pair<qint64, MessagePtr>> pendingMessages;
+            std::vector<PendingYouTubeMessage> pendingMessages;
             const auto actions = cc["actions"].toArray();
             for (const auto &actionVal : actions)
             {
@@ -1104,7 +1606,8 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                         action["removeChatItemAction"].toObject();
                     !deleteAction.isEmpty())
                 {
-                    handleMessageDeleted(*self, deleteAction);
+                    handleMessageDeleted(
+                        *self, deleteAction["targetItemId"].toString());
                     continue;
                 }
 
@@ -1163,6 +1666,16 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                 builder->displayName = authorName;
                 builder->userID =
                     renderer["authorExternalChannelId"].toString();
+                {
+                    auto thumbnails = renderer["authorPhoto"]
+                                          .toObject()["thumbnails"]
+                                          .toArray();
+                    if (!thumbnails.isEmpty())
+                    {
+                        builder->authorAvatarUrl =
+                            thumbnails.last().toObject()["url"].toString();
+                    }
+                }
                 builder->messageText = messageText;
                 builder->searchText = authorName % u": "_s % messageText;
 
@@ -1184,6 +1697,16 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                         ? builder->serverReceivedTime.toLocalTime().time()
                         : QTime::currentTime());
 
+                // Adds the moderation-mode action buttons configured in
+                // settings (only visibly rendered when moderation mode is
+                // toggled on for the split). Skipped for the broadcaster's
+                // own messages if we already know their channel ID.
+                if (self->broadcasterChannelId_.isEmpty() ||
+                    builder->userID != self->broadcasterChannelId_)
+                {
+                    builder.emplace<TwitchModerationElement>();
+                }
+
                 for (const auto &[emote, flag] : parseAuthorBadges(renderer))
                 {
                     builder.emplace<BadgeElement>(emote, flag);
@@ -1198,7 +1721,13 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
 
                 appendMessageRuns(builder, messageRuns);
 
-                pendingMessages.emplace_back(timestampUsec, builder.release());
+                appendYouTubeRepeatedMessageCounter(
+                    builder, *self, self->broadcasterChannelId_, renderer,
+                    !self->receivedFirstBatch_);
+
+                auto alert = processYouTubeHighlights(builder);
+                pendingMessages.push_back(
+                    {timestampUsec, builder.release(), alert});
             }
 
             // YouTube's actions array isn't reliably in chronological order
@@ -1207,7 +1736,7 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
             // fillInMissingMessages' ascending-order assumption holds.
             std::stable_sort(pendingMessages.begin(), pendingMessages.end(),
                              [](const auto &a, const auto &b) {
-                                 return a.first < b.first;
+                                 return a.timestampUsec < b.timestampUsec;
                              });
 
             if (!self->receivedFirstBatch_)
@@ -1223,7 +1752,19 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                 historyMessages.reserve(pendingMessages.size());
                 for (auto &pending : pendingMessages)
                 {
-                    historyMessages.push_back(pending.second);
+                    historyMessages.push_back(pending.message);
+                    // Skip the alert/sound for history (same as a Twitch
+                    // "historical" message never plays one), but it still
+                    // got the Highlighted flag/color from
+                    // processYouTubeHighlights above, so it still stands
+                    // out visually and shows up in Mentions.
+                    if (pending.message->flags.has(MessageFlag::Highlighted) &&
+                        pending.message->flags.has(
+                            MessageFlag::ShowInMentions))
+                    {
+                        getApp()->getTwitch()->getMentionsChannel()->addMessage(
+                            pending.message, MessageContext::Original);
+                    }
                 }
                 self->fillInMissingMessages(historyMessages);
             }
@@ -1239,35 +1780,40 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                 qint64 cumulativeDelayMs = 0;
                 qint64 prevTimestampUsec = 0;
                 bool firstMessage = true;
-                for (auto &[timestampUsec, msg] : pendingMessages)
+                for (auto &pending : pendingMessages)
                 {
                     if (firstMessage)
                     {
-                        self->addMessage(msg, MessageContext::Original);
+                        self->addMessage(pending.message,
+                                         MessageContext::Original);
+                        deliverYouTubeHighlight(*self, pending);
                         firstMessage = false;
-                        prevTimestampUsec = timestampUsec;
+                        prevTimestampUsec = pending.timestampUsec;
                         continue;
                     }
 
                     qint64 deltaMs = minStaggerMs;
-                    if (timestampUsec > 0 && prevTimestampUsec > 0)
+                    if (pending.timestampUsec > 0 && prevTimestampUsec > 0)
                     {
-                        deltaMs = (timestampUsec - prevTimestampUsec) / 1000;
+                        deltaMs =
+                            (pending.timestampUsec - prevTimestampUsec) / 1000;
                     }
                     deltaMs =
                         std::clamp(deltaMs, minStaggerMs, maxStaggerMs);
                     cumulativeDelayMs += deltaMs;
-                    if (timestampUsec > 0)
+                    if (pending.timestampUsec > 0)
                     {
-                        prevTimestampUsec = timestampUsec;
+                        prevTimestampUsec = pending.timestampUsec;
                     }
 
-                    QTimer::singleShot(cumulativeDelayMs, [weak, msg] {
+                    QTimer::singleShot(cumulativeDelayMs, [weak, pending] {
                         auto self = std::static_pointer_cast<YouTubeChannel>(
                             weak.lock());
                         if (self)
                         {
-                            self->addMessage(msg, MessageContext::Original);
+                            self->addMessage(pending.message,
+                                             MessageContext::Original);
+                            deliverYouTubeHighlight(*self, pending);
                         }
                     });
                 }

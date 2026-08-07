@@ -50,6 +50,7 @@
 #include "providers/emoji/Emojis.hpp"
 #include "providers/IvrApi.hpp"
 #include "providers/kick/KickChannel.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
@@ -162,6 +163,25 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
             }
 
             const auto &v = message->loginName;
+
+            if (v.isEmpty())
+            {
+                return altText;
+            }
+
+            return v;
+        },
+    },
+    {
+        "user.id",
+        [](const auto &altText, const auto &channel, const auto *message) {
+            (void)(channel);  //unused
+            if (message == nullptr)
+            {
+                return altText;
+            }
+
+            const auto &v = message->userID;
 
             if (v.isEmpty())
             {
@@ -663,6 +683,7 @@ QString CommandController::execCommand(const QString &textNoEmoji,
                     channel,
                     dynamic_cast<TwitchChannel *>(channel.get()),
                     dynamic_cast<KickChannel *>(channel.get()),
+                    dynamic_cast<YouTubeChannel *>(channel.get()),
                 };
                 return (*command)(ctx);
             }
