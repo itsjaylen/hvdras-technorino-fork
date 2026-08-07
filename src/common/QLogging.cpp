@@ -69,3 +69,4 @@ Q_LOGGING_CATEGORY(chatterinoWidget, "chatterino.widget", logThreshold);
 Q_LOGGING_CATEGORY(chatterinoWindowmanager, "chatterino.windowmanager",
                    logThreshold);
 Q_LOGGING_CATEGORY(chatterinoXDG, "chatterino.xdg", logThreshold);
+Q_LOGGING_CATEGORY(chatterinoYoutube, "chatterino.youtube", logThreshold);

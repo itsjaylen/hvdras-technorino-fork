@@ -8,6 +8,7 @@
 
 #include <pajlada/signals/signal.hpp>
 #include <pajlada/signals/signalholder.hpp>
+#include <QDateTime>
 #include <QString>
 
 #include <memory>
@@ -39,6 +40,19 @@ public:
     bool isLive() const override;
     bool canReconnect() const override;
     void reconnect() override;
+    bool hasModRights() const override;
+
+    /// Deletes a message via the official YouTube Data API v3, using the
+    /// currently logged-in YouTubeAccount's OAuth token. Requires that
+    /// account to actually be a moderator/owner of this chat - otherwise
+    /// the request fails and a system message is posted with the error.
+    ///
+    /// The message's own ID (as seen from the unofficial live chat feed
+    /// this channel reads from) isn't a valid ID for the official API, so
+    /// it's looked up by author/timestamp/text first - see
+    /// YouTubeApi::findMessageId.
+    void deleteMessage(const QString &authorChannelId,
+                       const QDateTime &timestamp, const QString &messageText);
 
     /// Fired whenever isLive() changes, so the tab's live indicator updates.
     pajlada::Signals::NoArgSignal liveStatusChanged;
@@ -71,6 +85,10 @@ private:
     // than staggered like later polls. Reset whenever a new connection to a
     // live chat starts.
     bool receivedFirstBatch_ = false;
+    // Cached activeLiveChatId for the current videoId_, resolved lazily on
+    // first moderation action. Cleared whenever videoId_ changes (i.e. a new
+    // connection/broadcast is picked up).
+    QString liveChatId_;
 
     pajlada::Signals::SignalHolder signalHolder_;
 };

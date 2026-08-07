@@ -22,6 +22,8 @@ Account::Account(ProviderId providerId)
                 return twitch;
             case ProviderId::Kick:
                 return u"Kick"_s;
+            case ProviderId::YouTube:
+                return u"YouTube"_s;
         }
         return QString("Unknown ProviderId");
     }();

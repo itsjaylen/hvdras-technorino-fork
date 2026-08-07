@@ -7,6 +7,7 @@
 #include "common/SignalVector.hpp"
 #include "providers/kick/KickAccountManager.hpp"
 #include "providers/twitch/TwitchAccountManager.hpp"
+#include "providers/youtube/YouTubeAccountManager.hpp"
 
 #include <QObject>
 
@@ -32,6 +33,7 @@ public:
 
     TwitchAccountManager twitch;
     KickAccountManager kick;
+    YouTubeAccountManager youtube;
 
 private:
     SignalVector<std::shared_ptr<Account>> accounts_;

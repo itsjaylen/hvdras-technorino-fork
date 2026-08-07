@@ -8,6 +8,7 @@
 #include "controllers/accounts/AccountModel.hpp"
 #include "providers/kick/KickAccount.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
+#include "providers/youtube/YouTubeAccount.hpp"
 #include "util/SharedPtrElementLess.hpp"
 
 namespace chatterino {
@@ -51,6 +52,23 @@ AccountController::AccountController()
             }
         });
 
+    std::ignore =
+        this->youtube.accounts.itemInserted.connect([this](const auto &args) {
+            this->accounts_.insert(args.item);
+        });
+
+    std::ignore =
+        this->youtube.accounts.itemRemoved.connect([this](const auto &args) {
+            if (args.caller != this)
+            {
+                this->accounts_.removeFirstMatching(
+                    [&](const auto &item) {
+                        return item == args.item;
+                    },
+                    this);
+            }
+        });
+
     std::ignore = this->accounts_.itemRemoved.connect([this](const auto &args) {
         switch (args.item->getProviderId())
         {
@@ -76,6 +94,17 @@ AccountController::AccountController()
                 }
             }
             break;
+            case ProviderId::YouTube: {
+                if (args.caller != this)
+                {
+                    this->youtube.accounts.removeFirstMatching(
+                        [&](const auto &item) {
+                            return item == args.item;
+                        },
+                        this);
+                }
+            }
+            break;
         }
     });
 }
@@ -84,6 +113,7 @@ void AccountController::load()
 {
     this->twitch.load();
     this->kick.load();
+    this->youtube.load();
 }
 
 AccountModel *AccountController::createModel(QObject *parent)

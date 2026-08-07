@@ -3017,16 +3017,23 @@ void ChannelView::addMessageContextMenuItems(QMenu *menu,
         auto *moderateMenu = new QMenu(menu);
         moderateAction->setMenu(moderateMenu);
         moderateMenu->addAction(
-            "&Delete message", [chan, id = layout->getMessage()->id] {
+            "&Delete message", [chan, messagePtr = layout->getMessagePtr()] {
                 auto *twitchChannel = dynamic_cast<TwitchChannel *>(chan.get());
                 if (twitchChannel)
                 {
                     twitchChannel->deleteMessagesAs(
-                        id, getApp()->getAccounts()->twitch.getCurrent().get());
+                        messagePtr->id,
+                        getApp()->getAccounts()->twitch.getCurrent().get());
                 }
                 else if (auto *kc = dynamic_cast<KickChannel *>(chan.get()))
                 {
-                    kc->deleteMessage(id);
+                    kc->deleteMessage(messagePtr->id);
+                }
+                else if (auto *yc = dynamic_cast<YouTubeChannel *>(chan.get()))
+                {
+                    yc->deleteMessage(messagePtr->userID,
+                                      messagePtr->serverReceivedTime,
+                                      messagePtr->messageText);
                 }
             });
 

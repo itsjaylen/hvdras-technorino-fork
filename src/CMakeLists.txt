@@ -452,6 +452,12 @@ set(SOURCE_FILES
         providers/kick/KickMessageBuilder.cpp
         providers/kick/KickMessageBuilder.hpp
 
+        providers/youtube/YouTubeAccount.cpp
+        providers/youtube/YouTubeAccount.hpp
+        providers/youtube/YouTubeAccountManager.cpp
+        providers/youtube/YouTubeAccountManager.hpp
+        providers/youtube/YouTubeApi.cpp
+        providers/youtube/YouTubeApi.hpp
         providers/youtube/YouTubeChannel.cpp
         providers/youtube/YouTubeChannel.hpp
         providers/youtube/YouTubeChatServer.cpp
@@ -808,6 +814,8 @@ set(SOURCE_FILES
         widgets/dialogs/UserInfoPopup.hpp
         widgets/dialogs/WelcomeDialog.cpp
         widgets/dialogs/WelcomeDialog.hpp
+        widgets/dialogs/YouTubeLoginPage.cpp
+        widgets/dialogs/YouTubeLoginPage.hpp
         widgets/dialogs/switcher/NewPopupItem.cpp
         widgets/dialogs/switcher/NewPopupItem.hpp
         widgets/dialogs/switcher/NewTabItem.cpp

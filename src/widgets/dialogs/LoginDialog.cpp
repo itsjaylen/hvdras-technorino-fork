@@ -265,6 +265,7 @@ LoginDialog::LoginDialog(QWidget *parent)
     this->ui_.mainLayout.addWidget(&this->ui_.buttonBox);
 
     this->ui_.tabWidget.addTab(&this->ui_.kick, "Kick");
+    this->ui_.tabWidget.addTab(&this->ui_.youtube, "YouTube");
 }
 
 }  // namespace chatterino
