@@ -419,29 +419,19 @@ void appendMessageRuns(MessageBuilder &builder, const QJsonArray &runs)
         if (run.contains("text"_L1))
         {
             auto text = run["text"].toString();
-            if (text.contains(u'@'))
+            // Route word-by-word through the same per-word processing
+            // Twitch messages use (MessageBuilder::addWordFromUserMessage),
+            // which is what actually detects links as well as @mentions -
+            // a plain emplace<TextElement> here (the previous approach for
+            // non-'@' runs) never checked for links at all, so URLs never
+            // became clickable.
+            for (const auto &word : text.split(u' '))
             {
-                // Route word-by-word through the same @mention detection
-                // Twitch messages use, so a mention becomes clickable (and
-                // opens that user's usercard) if they're still in the
-                // local message history - same lookup UserInfoPopup
-                // already does for YouTube usernames. Only done for runs
-                // that could plausibly contain one, to leave every other
-                // message's rendering untouched.
-                for (const auto &word : text.split(u' '))
+                if (word.isEmpty())
                 {
-                    if (word.isEmpty())
-                    {
-                        continue;
-                    }
-                    builder.addWordFromUserMessage(word);
+                    continue;
                 }
-            }
-            else
-            {
-                builder.emplace<TextElement>(
-                    text, MessageElementFlags{MessageElementFlag::Text},
-                    MessageColor::Text);
+                builder.addWordFromUserMessage(word);
             }
             continue;
         }
