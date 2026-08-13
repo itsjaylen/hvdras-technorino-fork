@@ -125,8 +125,16 @@ public:
 private:
     void fetchChannelLivePage(const QString &handle);
     void fetchWatchPage();
-    void fetchLiveChat(const QString &continuation);
-    void scheduleNextPoll(const QString &continuation, int timeoutMs);
+    /// `generation` must be the value of connectionGeneration_ captured at
+    /// the start of the fetchWatchPage()/fetchChannelLivePage() call that
+    /// discovered this chat - every step of a poll chain (this, its retry
+    /// path, and scheduleNextPoll) carries it forward and bails out if it
+    /// no longer matches connectionGeneration_, so an old chain a
+    /// reconnect/rediscovery left behind quietly dies instead of running
+    /// alongside the new one and duplicating every message.
+    void fetchLiveChat(const QString &continuation, int generation);
+    void scheduleNextPoll(const QString &continuation, int timeoutMs,
+                         int generation);
     void setLive(bool live);
     /// Called when the chat/stream we were watching ends (or a handle
     /// lookup finds nobody currently live). Schedules another attempt to
@@ -151,6 +159,10 @@ private:
     void refreshStreamStats();
 
     QString videoId_;
+    // Bumped every time fetchWatchPage()/fetchChannelLivePage() starts a
+    // fresh connection attempt (manual reconnect, rediscovery, or the
+    // error-retry path) - see fetchLiveChat()'s doc comment.
+    int connectionGeneration_ = 0;
     // The owning channel's path (e.g. "@somechannel" or "channel/UCxxxx").
     // Set immediately if this channel was opened via a handle; otherwise
     // learned from the video's watch page once it's fetched. Used to

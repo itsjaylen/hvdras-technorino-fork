@@ -1261,13 +1261,19 @@ void YouTubeChannel::refreshStreamStats()
 
 void YouTubeChannel::scheduleRediscovery()
 {
+    qCWarning(chatterinoYoutube)
+        << "Scheduling rediscovery in" << REDISCOVERY_RETRY_MS << "ms";
     auto weak = this->weak_from_this();
     QTimer::singleShot(REDISCOVERY_RETRY_MS, [weak] {
         auto self = std::static_pointer_cast<YouTubeChannel>(weak.lock());
         if (!self)
         {
+            qCWarning(chatterinoYoutube)
+                << "Rediscovery timer fired but channel is gone";
             return;
         }
+        qCWarning(chatterinoYoutube)
+            << "Rediscovery firing, handle:" << self->handle_;
         if (self->handle_.isEmpty())
         {
             self->fetchWatchPage();
@@ -1281,6 +1287,9 @@ void YouTubeChannel::scheduleRediscovery()
 
 void YouTubeChannel::fetchChannelLivePage(const QString &handle)
 {
+    // A new connection attempt starting invalidates any poll chain a
+    // previous one left running (see fetchLiveChat's doc comment).
+    auto generation = ++this->connectionGeneration_;
     auto weak = this->weak_from_this();
 
     NetworkRequest(u"https://www.youtube.com/%1/live"_s.arg(handle))
@@ -1288,7 +1297,7 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
         .header("Accept-Language", "en-US,en;q=0.9")
         .followRedirects(true)
         .timeout(PAGE_FETCH_TIMEOUT_MS)
-        .onSuccess([weak](const NetworkResult &result) {
+        .onSuccess([weak, generation](const NetworkResult &result) {
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
@@ -1352,7 +1361,7 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
             self->addSystemMessage(
                 u"YouTube: Live chat found for %1, connecting..."_s.arg(
                     self->videoId_));
-            self->fetchLiveChat(continuation);
+            self->fetchLiveChat(continuation, generation);
         })
         .onError([weak](const NetworkResult &result) {
             auto self =
@@ -1381,6 +1390,9 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
 
 void YouTubeChannel::fetchWatchPage()
 {
+    // A new connection attempt starting invalidates any poll chain a
+    // previous one left running (see fetchLiveChat's doc comment).
+    auto generation = ++this->connectionGeneration_;
     auto weak = this->weak_from_this();
 
     NetworkRequest(u"https://www.youtube.com/watch?v=%1"_s.arg(this->videoId_))
@@ -1388,7 +1400,7 @@ void YouTubeChannel::fetchWatchPage()
         .header("Accept-Language", "en-US,en;q=0.9")
         .followRedirects(true)
         .timeout(PAGE_FETCH_TIMEOUT_MS)
-        .onSuccess([weak](const NetworkResult &result) {
+        .onSuccess([weak, generation](const NetworkResult &result) {
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
@@ -1445,7 +1457,7 @@ void YouTubeChannel::fetchWatchPage()
             self->attemptedModStatusCheck_ = false;
             self->bansByChannelId_.clear();
             self->addSystemMessage(u"YouTube: Live chat found, connecting..."_s);
-            self->fetchLiveChat(continuation);
+            self->fetchLiveChat(continuation, generation);
         })
         .onError([weak](const NetworkResult &result) {
             auto self =
@@ -1472,9 +1484,25 @@ void YouTubeChannel::fetchWatchPage()
         .execute();
 }
 
-void YouTubeChannel::fetchLiveChat(const QString &continuation)
+void YouTubeChannel::fetchLiveChat(const QString &continuation, int generation)
 {
+    if (generation != this->connectionGeneration_)
+    {
+        // A newer connection attempt (manual reconnect, rediscovery, or an
+        // error retry) has since started - this chain belongs to an
+        // abandoned one and must not keep polling, or every message would
+        // show up twice (once per active chain).
+        qCWarning(chatterinoYoutube)
+            << "Dropping poll from stale connection generation" << generation
+            << "(current:" << this->connectionGeneration_ << ")";
+        return;
+    }
+
     auto weak = this->weak_from_this();
+
+    qCWarning(chatterinoYoutube)
+        << "Polling live chat for" << this->videoId_
+        << "continuation length:" << continuation.length();
 
     const QJsonObject requestBody{
         {"context",
@@ -1510,10 +1538,10 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
         .header("X-YouTube-Client-Name", INNERTUBE_CLIENT_NAME_NUM)
         .header("X-YouTube-Client-Version", INNERTUBE_CLIENT_VERSION)
         .timeout(LIVE_CHAT_TIMEOUT_MS)
-        .onSuccess([weak](const NetworkResult &result) {
+        .onSuccess([weak, generation](const NetworkResult &result) {
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
-            if (!self)
+            if (!self || generation != self->connectionGeneration_)
             {
                 return;
             }
@@ -1796,21 +1824,27 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                         prevTimestampUsec = pending.timestampUsec;
                     }
 
-                    QTimer::singleShot(cumulativeDelayMs, [weak, pending] {
-                        auto self = std::static_pointer_cast<YouTubeChannel>(
-                            weak.lock());
-                        if (self)
-                        {
-                            self->addMessage(pending.message,
-                                             MessageContext::Original);
-                            deliverYouTubeHighlight(*self, pending);
-                        }
-                    });
+                    QTimer::singleShot(
+                        cumulativeDelayMs, [weak, pending, generation] {
+                            auto self =
+                                std::static_pointer_cast<YouTubeChannel>(
+                                    weak.lock());
+                            if (self &&
+                                generation == self->connectionGeneration_)
+                            {
+                                self->addMessage(pending.message,
+                                                 MessageContext::Original);
+                                deliverYouTubeHighlight(*self, pending);
+                            }
+                        });
                 }
             }
 
             if (nextContinuation.isEmpty())
             {
+                qCWarning(chatterinoYoutube)
+                    << "Poll succeeded but returned no next continuation - "
+                       "treating as stream ended";
                 self->setLive(false);
                 self->addSystemMessage(
                     u"YouTube: Live chat ended. Will keep checking for a new stream..."_s);
@@ -1818,12 +1852,15 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
                 return;
             }
 
-            self->scheduleNextPoll(nextContinuation, timeoutMs);
+            qCWarning(chatterinoYoutube)
+                << "Poll OK," << actions.size() << "action(s), next poll in"
+                << timeoutMs << "ms";
+            self->scheduleNextPoll(nextContinuation, timeoutMs, generation);
         })
-        .onError([weak](const NetworkResult &result) {
+        .onError([weak, generation](const NetworkResult &result) {
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
-            if (!self)
+            if (!self || generation != self->connectionGeneration_)
             {
                 return;
             }
@@ -1843,15 +1880,19 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation)
 }
 
 void YouTubeChannel::scheduleNextPoll(const QString &continuation,
-                                      int timeoutMs)
+                                      int timeoutMs, int generation)
 {
     auto weak = this->weak_from_this();
-    QTimer::singleShot(timeoutMs, [weak, continuation] {
+    QTimer::singleShot(timeoutMs, [weak, continuation, generation] {
         auto self = std::static_pointer_cast<YouTubeChannel>(weak.lock());
-        if (self)
+        if (!self)
         {
-            self->fetchLiveChat(continuation);
+            qCWarning(chatterinoYoutube)
+                << "Poll timer fired but channel is gone - not "
+                   "rescheduling";
+            return;
         }
+        self->fetchLiveChat(continuation, generation);
     });
 }
 
