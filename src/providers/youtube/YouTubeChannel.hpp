@@ -37,6 +37,13 @@ public:
     std::weak_ptr<YouTubeChannel> weakFromThis();
 
     const QString &videoId() const;
+    /// The owning channel's path (e.g. "@somehandle" or "channel/UCxxxx"),
+    /// if known - set immediately if this channel was opened via a handle,
+    /// otherwise learned lazily from the watch page. Used by
+    /// YouTubeChatServer to recognize that a channel opened by raw video ID
+    /// is actually the same broadcast as one already open under its
+    /// handle, so it doesn't end up polled by two independent instances.
+    const QString &handle() const;
 
     /// The stream's title, if known. Populated once when the watch/live page
     /// is first fetched; not kept up to date afterwards.
