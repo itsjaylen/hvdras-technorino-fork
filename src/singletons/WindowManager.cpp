@@ -148,6 +148,7 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
     this->updateWordTypeMaskListener.add(settings.showBadgesBttv);
     this->updateWordTypeMaskListener.add(settings.showBadgesSevenTV);
     this->updateWordTypeMaskListener.add(settings.enableEmoteImages);
+    this->updateWordTypeMaskListener.add(settings.enableTwitchGifMessages);
     this->updateWordTypeMaskListener.add(settings.lowercaseDomains);
     this->updateWordTypeMaskListener.add(settings.showReplyButton);
 
@@ -228,6 +229,12 @@ void WindowManager::updateWordTypeMask()
     }
     flags.set(MEF::EmoteText);
     flags.set(MEF::EmojiText);
+
+    // Twitch inline chat GIFs
+    if (settings->enableTwitchGifMessages)
+    {
+        flags.set(MEF::TwitchGifImage);
+    }
 
     // bits
     flags.set(MEF::BitsAmount);

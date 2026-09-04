@@ -37,6 +37,11 @@ public:
     std::weak_ptr<YouTubeChannel> weakFromThis();
 
     const QString &videoId() const;
+    /// Whether `generation` still matches the current connectionGeneration_
+    /// - used by armStuckRequestWatchdog (YouTubeChannel.cpp), a free
+    /// function that needs the same staleness check fetchLiveChat's own
+    /// continuations use but can't reach the private counter directly.
+    bool isCurrentGeneration(int generation) const;
     /// The owning channel's path (e.g. "@somehandle" or "channel/UCxxxx"),
     /// if known - set immediately if this channel was opened via a handle,
     /// otherwise learned lazily from the watch page. Used by

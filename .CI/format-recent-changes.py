@@ -6,7 +6,7 @@ import argparse
 
 
 ROOT_DOWNLOAD_URL = (
-    "https://github.com/SevenTV/chatterino7/releases/download/nightly-build"
+    "https://github.com/hvdras/hvdras-technorino-fork/releases/download/nightly-build"
 )
 WIN_X64_INSTALLERS = ["Chatterino7TV.Nightly.Installer.exe"]
 WIN_ARM64_INSTALLERS = ["Experimental-ARM64-Chatterino7TV.Nightly.Installer.exe"]
@@ -140,7 +140,7 @@ print("> [!WARNING]")
 current_stable = get_current_stable()
 stable_note = (
     " If you're looking for the latest stable release, see "
-    f"https://github.com/SevenTV/chatterino7/releases/tag/{current_stable}."
+    f"https://github.com/hvdras/hvdras-technorino-fork/releases/tag/{current_stable}."
     if current_stable
     else ""
 )

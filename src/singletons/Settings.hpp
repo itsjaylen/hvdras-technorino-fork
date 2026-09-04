@@ -443,6 +443,10 @@ public:
     };
     BoolSetting showUnlistedSevenTVEmotes = {
         "/emotes/showUnlistedSevenTVEmotes", false};
+
+    /// Twitch inline chat GIFs (sent via the GIF picker)
+    BoolSetting enableTwitchGifMessages = {"/twitch/enableGifMessages", true};
+    IntSetting twitchGifMessageSize = {"/twitch/gifMessageSize", 128};
     /**
      * This setting is kept for backwards compatibility.
      */

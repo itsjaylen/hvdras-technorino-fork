@@ -20,6 +20,18 @@ struct TwitchEmoteOccurrence {
     int end;
     EmotePtr ptr;
     EmoteName name;
+    /// True for an occurrence parsed from the `gifs` tag (Twitch's inline
+    /// chat GIFs) rather than the `emotes` tag - splices into the message
+    /// the same way a real emote does, but renders as a TwitchGifElement
+    /// instead of an EmoteElement so it has its own visibility/size
+    /// settings. See parseTwitchGifs.
+    bool isGif = false;
+    /// For a GIF occurrence, the same GIF at its original (full-size,
+    /// undownsized) quality - tried if `ptr`'s downsized rendition fails to
+    /// load (e.g. Giphy doesn't have a "downsized" variant for it), before
+    /// giving up and falling back to text entirely. Null for real emote
+    /// occurrences.
+    EmotePtr fallbackPtr;
 
     bool operator==(const TwitchEmoteOccurrence &other) const
     {
@@ -70,5 +82,22 @@ std::vector<TwitchBadge> parseBadgeTag(Communi::TagsRef tags,
 std::vector<TwitchEmoteOccurrence> parseTwitchEmotes(Communi::TagsRef tags,
                                                      const QString &content,
                                                      int messageOffset);
+
+/// @brief Parses Twitch's inline chat GIFs (the `gifs` tag) in an IRC message
+///
+/// The `gifs` tag is a comma-separated list of
+/// `<start position>-<end position>|<gifID>|<gifURL>` entries, using the
+/// same position convention as the `emotes` tag. The returned occurrences
+/// have `isGif` set and splice into the message the same way emotes do.
+///
+/// @param tags The tags of the IRC message
+/// @param content The message text - see parseTwitchEmotes for the same
+///                messageOffset caveat.
+/// @param messageOffset The offset of `content` compared to the original
+///                      message text - see parseTwitchEmotes.
+/// @returns A list of GIF occurrences and their positions
+std::vector<TwitchEmoteOccurrence> parseTwitchGifs(Communi::TagsRef tags,
+                                                   const QString &content,
+                                                   int messageOffset);
 
 }  // namespace chatterino

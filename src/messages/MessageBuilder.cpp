@@ -1960,6 +1960,21 @@ std::pair<MessagePtrMut, HighlightAlert> MessageBuilder::makeIrcMessage(
         textState.bitsLeft = optBits->toInt();
     }
 
+    // Twitch inline chat GIFs (sent via the GIF picker). Unlike emotes,
+    // these are always their own distinct message - sendGifMessage has no
+    // text parameter, so a message carrying a `gifs` tag is never mixed
+    // with other typed content. Handled as an entirely separate path
+    // rather than splicing into the emote/word pipeline below: that
+    // pipeline assumes single-token (no internal space) occurrences, and a
+    // GIF's placeholder text (e.g. "[Scared Still Waiting GIF by Looney
+    // Tunes]") spans multiple space-separated words - the per-word
+    // matching would never find it fitting inside any single word, and
+    // worse, would get permanently stuck on it and silently stop splicing
+    // in any real emotes later in the same message.
+    auto twitchGifs =
+        parseTwitchGifs(tags, content, static_cast<int>(messageOffset));
+    bool isGifMessage = !twitchGifs.empty();
+
     // Twitch emotes
     auto twitchEmotes =
         parseTwitchEmotes(tags, content, static_cast<int>(messageOffset));
@@ -1977,61 +1992,73 @@ std::pair<MessagePtrMut, HighlightAlert> MessageBuilder::makeIrcMessage(
         });
     twitchEmotes.erase(uniqueEmotes.begin(), uniqueEmotes.end());
 
-    bool traditionalParsing = true;
-    if (getSettings()->markdownParsing)
+    if (isGifMessage)
     {
-        // parse
-        auto tokens = ast::lex(content);
-        // debug logs
-        // {
-        //     QDebug dbg = qDebug().nospace().noquote();
-        //     dbg << "[";
-        //     for (auto token : tokens)
-        //     {
-        //         dbg << ast::stringifyToken(token);
-        //         dbg << ", ";
-        //     }
-        //     dbg << "]";
-        // }
-
-        QVector<ast::ASTNode> ast;
-        try
+        for (const auto &gifOccurrence : twitchGifs)
         {
-            ast::MatchResponse response = ast::matchMarkdown(0, &tokens);
-            if (response.accepted)
-            {
-                traditionalParsing = false;
-                ast = ast::normalizeTextNodes(response.nodes);
-            }
-        }
-        catch (const std::exception &e)
-        {
-            traditionalParsing = true;
-            qWarning() << "Exception parsing message:" << e.what();
-        }
-
-        if (!traditionalParsing)
-        {
-            // debug logs
-            // QDebug dbg = qDebug().nospace().noquote();
-            // dbg << "[";
-            // for (auto node : ast)
-            // {
-            //     dbg << ast::stringifyNode(node);
-            //     dbg << ", ";
-            // }
-            // dbg << "]";
-
-            builder.addWordsFromAstNodes(ast, twitchEmotes, textState);
+            builder.emplace<TwitchGifElement>(gifOccurrence.ptr,
+                                              gifOccurrence.fallbackPtr,
+                                              MessageElementFlag::TwitchGif);
         }
     }
-
-    if (traditionalParsing)
+    else
     {
-        // words
-        QStringList splits = content.split(' ');
+        bool traditionalParsing = true;
+        if (getSettings()->markdownParsing)
+        {
+            // parse
+            auto tokens = ast::lex(content);
+            // debug logs
+            // {
+            //     QDebug dbg = qDebug().nospace().noquote();
+            //     dbg << "[";
+            //     for (auto token : tokens)
+            //     {
+            //         dbg << ast::stringifyToken(token);
+            //         dbg << ", ";
+            //     }
+            //     dbg << "]";
+            // }
 
-        builder.addWords(splits, twitchEmotes, textState);
+            QVector<ast::ASTNode> ast;
+            try
+            {
+                ast::MatchResponse response = ast::matchMarkdown(0, &tokens);
+                if (response.accepted)
+                {
+                    traditionalParsing = false;
+                    ast = ast::normalizeTextNodes(response.nodes);
+                }
+            }
+            catch (const std::exception &e)
+            {
+                traditionalParsing = true;
+                qWarning() << "Exception parsing message:" << e.what();
+            }
+
+            if (!traditionalParsing)
+            {
+                // debug logs
+                // QDebug dbg = qDebug().nospace().noquote();
+                // dbg << "[";
+                // for (auto node : ast)
+                // {
+                //     dbg << ast::stringifyNode(node);
+                //     dbg << ", ";
+                // }
+                // dbg << "]";
+
+                builder.addWordsFromAstNodes(ast, twitchEmotes, textState);
+            }
+        }
+
+        if (traditionalParsing)
+        {
+            // words
+            QStringList splits = content.split(' ');
+
+            builder.addWords(splits, twitchEmotes, textState);
+        }
     }
 
     appendRepeatedMessageCounter(builder, channel, tags, content,

@@ -27,6 +27,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -370,6 +371,119 @@ std::unique_ptr<MessageElement> EmoteElement::clone() const
 {
     auto elem = std::make_unique<EmoteElement>(this->emote_, this->getFlags(),
                                                this->textColor_);
+    elem->cloneFrom(*this);
+    return elem;
+}
+
+// TWITCH GIF
+TwitchGifElement::TwitchGifElement(const EmotePtr &emote,
+                                   const EmotePtr &fallbackEmote,
+                                   MessageElementFlags flags,
+                                   const MessageColor &textElementColor)
+    : MessageElement(flags)
+    , textColor_(textElementColor)
+    , emote_(emote)
+    , fallbackEmote_(fallbackEmote)
+{
+    this->setTooltip(emote->tooltip.string);
+}
+
+EmotePtr TwitchGifElement::getEmote() const
+{
+    return this->emote_;
+}
+
+void TwitchGifElement::addToContainer(MessageLayoutContainer &container,
+                                      const MessageLayoutContext &ctx)
+{
+    if (ctx.flags.hasNone(this->getFlags()))
+    {
+        return;
+    }
+
+    if (ctx.flags.has(MessageElementFlag::TwitchGifImage))
+    {
+        ImagePtr image =
+            this->emote_->images.getImageOrLoaded(container.getImageScale());
+
+        if (image->isEmpty() && this->fallbackEmote_)
+        {
+            // The preferred (downsized) rendition failed to load - e.g.
+            // Giphy doesn't have one for this particular GIF - fall back to
+            // the original quality before giving up on the image entirely.
+            image = this->fallbackEmote_->images.getImageOrLoaded(
+                container.getImageScale());
+        }
+
+        if (image->isEmpty())
+        {
+            this->ensureText(true);
+        }
+        else
+        {
+            auto naturalSize = image->size();
+            qreal targetHeight =
+                std::max(16, getSettings()->twitchGifMessageSize.getValue());
+            qreal heightScale = naturalSize.height() > 0
+                                    ? targetHeight / naturalSize.height()
+                                    : 1.0;
+
+            auto size = naturalSize * heightScale * container.getScale();
+
+            container.addElement(new ImageLayoutElement(*this, image, size));
+            return;
+        }
+    }
+    else
+    {
+        this->ensureText(false);
+    }
+
+    auto textCtx = ctx;
+    textCtx.flags = MessageElementFlag::Misc;
+    this->textElement_->addToContainer(container, textCtx);
+}
+
+void TwitchGifElement::ensureText(bool asFallback)
+{
+    if (this->textElement_ && asFallback == this->usingFallbackColor_)
+    {
+        return;
+    }
+
+    auto color = this->textColor_;
+    if (asFallback)
+    {
+        color = MessageColor::System;
+    }
+    this->textElement_ = std::make_unique<TextElement>(
+        this->emote_->getCopyString(), MessageElementFlag::Misc, color);
+    this->usingFallbackColor_ = asFallback;
+}
+
+QJsonObject TwitchGifElement::toJson() const
+{
+    auto base = MessageElement::toJson();
+    base["type"_L1] = u"TwitchGifElement"_s;
+    base["emote"_L1] = this->emote_->toJson();
+    if (this->textElement_)
+    {
+        base["text"_L1] = this->textElement_->toJson();
+    }
+
+    return base;
+}
+
+std::string_view TwitchGifElement::type() const
+{
+    return std::remove_pointer_t<decltype(this)>::TYPE;
+}
+
+std::unique_ptr<MessageElement> TwitchGifElement::clone() const
+{
+    auto elem = std::make_unique<TwitchGifElement>(
+        this->emote_, this->fallbackEmote_, this->getFlags(),
+        this->textColor_);
     elem->cloneFrom(*this);
     return elem;
 }

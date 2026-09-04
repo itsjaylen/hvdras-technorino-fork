@@ -6,6 +6,7 @@
 
 #include "Application.hpp"
 #include "common/enums/MessageContext.hpp"
+#include "common/network/NetworkManager.hpp"
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
@@ -54,6 +55,9 @@ constexpr int REDISCOVERY_RETRY_MS = 60000;
 
 constexpr int PAGE_FETCH_TIMEOUT_MS = 15000;
 constexpr int LIVE_CHAT_TIMEOUT_MS = 20000;
+// Extra margin added on top of a request's own timeout before treating it
+// as permanently stuck - see armStuckRequestWatchdog's doc comment.
+constexpr int STUCK_REQUEST_GRACE_MS = 15000;
 // How often to refresh the tab tooltip's viewer count/uptime while live.
 constexpr int STATS_REFRESH_MS = 60000;
 
@@ -83,6 +87,66 @@ std::pair<qint64, qint64> messageStaggerRangeMs()
         std::swap(minMs, maxMs);
     }
     return {minMs, maxMs};
+}
+
+/// Schedules a fallback recovery for a network chain that may never
+/// complete at all - i.e. neither the request's onSuccess nor onError ever
+/// fires. This is possible despite the request having its own .timeout():
+/// NetworkTask only starts that timer once QNetworkReply::requestSent
+/// emits (deliberately, so slow-but-progressing connections aren't timed
+/// out too early - see #5729), so a reply that never actually gets sent on
+/// the wire at all (e.g. a connection pool left in a bad state after the
+/// OS suspends/resumes, or after many hours of uptime) has no timeout
+/// protection whatsoever. Since fetchLiveChat's next poll is only ever
+/// scheduled from its own onSuccess, a single stuck request like this
+/// silently ends the chat forever with no error message - this is the
+/// fallback for that.
+///
+/// `responded` must be set true as the very first line of both the
+/// request's onSuccess and onError handlers; if it's still false once this
+/// fires, the request is assumed dead and `recover` runs instead.
+void armStuckRequestWatchdog(std::weak_ptr<Channel> weak, int generation,
+                             std::shared_ptr<bool> responded, int delayMs,
+                             std::function<void(YouTubeChannel &)> recover)
+{
+    QTimer::singleShot(
+        delayMs, [weak, generation, responded = std::move(responded),
+                  recover = std::move(recover)] {
+            if (*responded)
+            {
+                return;
+            }
+            auto self = std::static_pointer_cast<YouTubeChannel>(weak.lock());
+            if (!self || !self->isCurrentGeneration(generation))
+            {
+                return;
+            }
+            *responded = true;
+            qCWarning(chatterinoYoutube)
+                << "Request never completed (stuck connection) - "
+                   "resetting connections and recovering";
+            self->addSystemMessage(
+                u"YouTube: Connection appears stuck. Reconnecting..."_s);
+
+            // A stuck request is usually Qt reusing a dead/wedged
+            // persistent connection to the host - simply abandoning it and
+            // issuing a new request via `recover` below tends to land on
+            // that same wedged connection and hang identically forever,
+            // since there's no API to cancel an individual in-flight
+            // NetworkRequest. Clearing the whole connection cache forces a
+            // fresh physical connection on the next request instead. Must
+            // run on the access manager's own thread (NetworkManager::
+            // workerThread), hence the queued invoke rather than calling it
+            // directly here.
+            if (auto *am = NetworkManager::accessManager)
+            {
+                QMetaObject::invokeMethod(
+                    am, [am] { am->clearConnectionCache(); },
+                    Qt::QueuedConnection);
+            }
+
+            recover(*self);
+        });
 }
 
 /// Recursively search obj for the first string value at key.
@@ -920,6 +984,11 @@ const QString &YouTubeChannel::videoId() const
     return this->videoId_;
 }
 
+bool YouTubeChannel::isCurrentGeneration(int generation) const
+{
+    return generation == this->connectionGeneration_;
+}
+
 const QString &YouTubeChannel::handle() const
 {
     return this->handle_;
@@ -1296,13 +1365,15 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
     // previous one left running (see fetchLiveChat's doc comment).
     auto generation = ++this->connectionGeneration_;
     auto weak = this->weak_from_this();
+    auto responded = std::make_shared<bool>(false);
 
     NetworkRequest(u"https://www.youtube.com/%1/live"_s.arg(handle))
         .header("User-Agent", USER_AGENT)
         .header("Accept-Language", "en-US,en;q=0.9")
         .followRedirects(true)
         .timeout(PAGE_FETCH_TIMEOUT_MS)
-        .onSuccess([weak, generation](const NetworkResult &result) {
+        .onSuccess([weak, generation, responded](const NetworkResult &result) {
+            *responded = true;
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
@@ -1368,7 +1439,8 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
                     self->videoId_));
             self->fetchLiveChat(continuation, generation);
         })
-        .onError([weak, generation](const NetworkResult &result) {
+        .onError([weak, generation, responded](const NetworkResult &result) {
+            *responded = true;
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
@@ -1391,6 +1463,11 @@ void YouTubeChannel::fetchChannelLivePage(const QString &handle)
             });
         })
         .execute();
+
+    armStuckRequestWatchdog(
+        weak, generation, responded,
+        PAGE_FETCH_TIMEOUT_MS + STUCK_REQUEST_GRACE_MS,
+        [](YouTubeChannel &self) { self.fetchChannelLivePage(self.handle_); });
 }
 
 void YouTubeChannel::fetchWatchPage()
@@ -1399,13 +1476,15 @@ void YouTubeChannel::fetchWatchPage()
     // previous one left running (see fetchLiveChat's doc comment).
     auto generation = ++this->connectionGeneration_;
     auto weak = this->weak_from_this();
+    auto responded = std::make_shared<bool>(false);
 
     NetworkRequest(u"https://www.youtube.com/watch?v=%1"_s.arg(this->videoId_))
         .header("User-Agent", USER_AGENT)
         .header("Accept-Language", "en-US,en;q=0.9")
         .followRedirects(true)
         .timeout(PAGE_FETCH_TIMEOUT_MS)
-        .onSuccess([weak, generation](const NetworkResult &result) {
+        .onSuccess([weak, generation, responded](const NetworkResult &result) {
+            *responded = true;
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
@@ -1464,7 +1543,8 @@ void YouTubeChannel::fetchWatchPage()
             self->addSystemMessage(u"YouTube: Live chat found, connecting..."_s);
             self->fetchLiveChat(continuation, generation);
         })
-        .onError([weak, generation](const NetworkResult &result) {
+        .onError([weak, generation, responded](const NetworkResult &result) {
+            *responded = true;
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self)
@@ -1487,6 +1567,11 @@ void YouTubeChannel::fetchWatchPage()
             });
         })
         .execute();
+
+    armStuckRequestWatchdog(
+        weak, generation, responded,
+        PAGE_FETCH_TIMEOUT_MS + STUCK_REQUEST_GRACE_MS,
+        [](YouTubeChannel &self) { self.fetchWatchPage(); });
 }
 
 void YouTubeChannel::fetchLiveChat(const QString &continuation, int generation)
@@ -1504,6 +1589,7 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation, int generation)
     }
 
     auto weak = this->weak_from_this();
+    auto responded = std::make_shared<bool>(false);
 
     qCWarning(chatterinoYoutube)
         << "Polling live chat for" << this->videoId_
@@ -1543,7 +1629,8 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation, int generation)
         .header("X-YouTube-Client-Name", INNERTUBE_CLIENT_NAME_NUM)
         .header("X-YouTube-Client-Version", INNERTUBE_CLIENT_VERSION)
         .timeout(LIVE_CHAT_TIMEOUT_MS)
-        .onSuccess([weak, generation](const NetworkResult &result) {
+        .onSuccess([weak, generation, responded](const NetworkResult &result) {
+            *responded = true;
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self || generation != self->connectionGeneration_)
@@ -1862,7 +1949,8 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation, int generation)
                 << timeoutMs << "ms";
             self->scheduleNextPoll(nextContinuation, timeoutMs, generation);
         })
-        .onError([weak, generation](const NetworkResult &result) {
+        .onError([weak, generation, responded](const NetworkResult &result) {
+            *responded = true;
             auto self =
                 std::static_pointer_cast<YouTubeChannel>(weak.lock());
             if (!self || generation != self->connectionGeneration_)
@@ -1882,6 +1970,11 @@ void YouTubeChannel::fetchLiveChat(const QString &continuation, int generation)
             });
         })
         .execute();
+
+    armStuckRequestWatchdog(
+        weak, generation, responded,
+        LIVE_CHAT_TIMEOUT_MS + STUCK_REQUEST_GRACE_MS,
+        [](YouTubeChannel &self) { self.fetchWatchPage(); });
 }
 
 void YouTubeChannel::scheduleNextPoll(const QString &continuation,

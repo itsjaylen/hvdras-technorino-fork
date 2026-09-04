@@ -602,11 +602,14 @@ void Image::actuallyLoad()
         }
 
         // use "double" to prevent int overflows
-        if (double(size.width()) * double(size.height()) *
-                double(reader.imageCount()) * 4.0 >
-            double(Image::maxBytesRam))
+        auto ramBytes = double(size.width()) * double(size.height()) *
+                        double(reader.imageCount()) * 4.0;
+        if (ramBytes > double(Image::maxBytesRam))
         {
-            qCDebug(chatterinoImage) << "image too large in RAM";
+            qCDebug(chatterinoImage)
+                << "image too large in RAM (" << (ramBytes / (1024.0 * 1024.0))
+                << "MB >" << (Image::maxBytesRam / (1024 * 1024)) << "MB):"
+                << shared->url().string;
 
             shared->empty_ = true;
             return;
@@ -616,12 +619,16 @@ void Image::actuallyLoad()
 
         assignFrames(shared, parsed);
     };
-    auto onError = [weak](const auto & /*result*/) {
+    auto onError = [weak](const auto &result) {
         auto shared = weak.lock();
         if (!shared)
         {
             return false;
         }
+
+        qCDebug(chatterinoImage)
+            << "Error loading image" << shared->url().string << ":"
+            << result.formatError();
 
         // fourtf: is this the right thing to do?
         shared->empty_ = true;

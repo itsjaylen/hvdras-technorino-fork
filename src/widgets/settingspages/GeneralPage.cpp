@@ -659,6 +659,27 @@ void GeneralPage::initLayout(GeneralPageView &layout)
 
     SettingWidget::dropdown("Emoji style", s.emojiSet)->addTo(layout);
 
+    SettingWidget::checkbox("Show Twitch GIF messages",
+                            s.enableTwitchGifMessages)
+        ->setTooltip(
+            "When disabled, GIFs sent via Twitch's chat GIF picker show as "
+            "their fallback text instead of the image.")
+        ->addKeywords({"gif"})
+        ->addTo(layout);
+
+    layout.addDropdown<int>(
+        "Twitch GIF message size",
+        {"64px", "96px", "128px", "160px", "200px", "256px"},
+        s.twitchGifMessageSize,
+        [](auto val) {
+            return QString::number(val) + "px";
+        },
+        [](auto args) {
+            return fuzzyToInt(args.value, 128);
+        },
+        true, {"The height GIFs sent via Twitch's chat GIF picker are shown "
+              "at, keeping their aspect ratio."});
+
     SettingWidget::checkbox("Show BetterTTV global emotes",
                             s.enableBTTVGlobalEmotes)
         ->addKeywords({"bttv"})

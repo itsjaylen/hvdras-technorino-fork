@@ -54,7 +54,13 @@ enum class MessageElementFlag : int64_t {
     ChannelPointReward = (1LL << 8),
     ChannelPointRewardImage = ChannelPointReward | EmoteImage,
 
-    // unused: (1LL << 9),
+    // Twitch's inline chat GIFs (sent via the GIF picker) - independent of
+    // EmoteImage so it has its own on/off toggle, sharing EmoteText for the
+    // fallback (the GIF's own alt text, e.g. "[Scared GIF by Looney Tunes]")
+    // when off.
+    TwitchGifImage = (1LL << 9),
+    TwitchGif = TwitchGifImage | EmoteText,
+
     // unused: (1LL << 10),
 
     BitsStatic = (1LL << 11),
@@ -544,6 +550,42 @@ private:
     bool usingFallbackColor_ = false;
 
     EmotePtr emote_;
+};
+
+// Renders a Twitch inline chat GIF (sent via the GIF picker) - laid out like
+// an EmoteElement (image, falling back to the alt text), but gated by its
+// own TwitchGifImage flag and sized from settings.gifMessageSize rather than
+// the regular emote scale, so it can be toggled/resized independently of
+// normal emotes.
+class TwitchGifElement : public MessageElement
+{
+public:
+    static constexpr std::string_view TYPE = "twitch-gif";
+
+    /// `fallbackData`, if non-null, is a second rendition of the same GIF
+    /// (Twitch's original, undownsized quality) tried if `data`'s own image
+    /// fails to load - see TwitchEmoteOccurrence::fallbackPtr.
+    TwitchGifElement(const EmotePtr &data, const EmotePtr &fallbackData,
+                     MessageElementFlags flags_,
+                     const MessageColor &textElementColor = MessageColor::Text);
+
+    void addToContainer(MessageLayoutContainer &container,
+                        const MessageLayoutContext &ctx) override;
+    EmotePtr getEmote() const;
+
+    QJsonObject toJson() const override;
+    std::string_view type() const override;
+    std::unique_ptr<MessageElement> clone() const override;
+
+private:
+    void ensureText(bool asFallback);
+
+    std::unique_ptr<TextElement> textElement_;
+    MessageColor textColor_;
+    bool usingFallbackColor_ = false;
+
+    EmotePtr emote_;
+    EmotePtr fallbackEmote_;
 };
 
 // A LayeredEmoteElement represents multiple Emotes layered on top of each other.
